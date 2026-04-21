@@ -69,12 +69,14 @@ services:
   # -------------------------------------------------------------------
   # pg-fastgpt : FastGPT metadata + pgvector store
   # -------------------------------------------------------------------
-  # NOTE (TASK-07): replace image with the FastGPT-recommended pgvector
-  # build (PGVECTOR_IMAGE_TAG env, currently CHANGE_ME). The placeholder
-  # below uses postgres:16-alpine so batch 3 can stand up without
-  # blocking on TASK-07's image decision.
+  # TASK-07 image lock: pgvector/pgvector:0.8.0-pg15 (FastGPT v4.14.12
+  # upstream compose literal — see deploy/docker/global/docker-compose.pg.yml).
+  # NOTE: pg-dify uses pgvector/pgvector:pg16 (errata-02). pg-fastgpt and
+  # pg-dify intentionally split major versions because FastGPT upstream
+  # tests against pg15; revisit unification after Phase 0 (backlog item
+  # logged in TASK-15).
   pg-fastgpt:
-    image: postgres:${PG_IMAGE_TAG:-16-alpine}
+    image: ${FASTGPT_PGVECTOR_IMAGE_TAG:-pgvector/pgvector:0.8.0-pg15}
     container_name: ncmu-pg-fastgpt
     environment:
       POSTGRES_USER: ${FASTGPT_DB_USER:-fastgpt}
@@ -470,6 +472,276 @@ services:
     networks:
       - default
 
+  # =====================================================================
+  # FastGPT v4.14.12 services (TASK-07)
+  # ---------------------------------------------------------------------
+  # Upstream reference :
+  #   https://github.com/labring/FastGPT/blob/v4.14.12/deploy/docker/global/docker-compose.pg.yml
+  # NCMU-specific deviations from upstream (documented for Pane 5 review):
+  #   1. pg-fastgpt is reused (NOT a separate fastgpt-vector container).
+  #      Image is pgvector/pgvector:0.8.0-pg15, init script in
+  #      docker/init-db/03-pg-fastgpt.sql installs the vector extension.
+  #   2. NCMU redis is reused at logical DB 2 (NOT a separate fastgpt-redis
+  #      container). NCMU redis runs without requirepass; FastGPT's REDIS_URL
+  #      reflects that.
+  #   3. fastgpt-minio is NOT deployed. Storage points to the host's MinIO
+  #      via host.docker.internal:9000 (per prerequisites-2026-04-21.md §4).
+  #   4. fastgpt-plugin IS deployed. Smoke testing showed fastgpt-app
+  #      hard-fails its `[plugin_error] Failed to parse URL from
+  #      /api/models/get-providers` initialization step when the plugin
+  #      server is absent (cannot construct a relative URL with no base).
+  #      We therefore vendor fastgpt-plugin v0.5.6 and reuse NCMU's
+  #      mongo/redis; STORAGE_* points at the host MinIO.
+  #   4b. fastgpt-code-sandbox / fastgpt-mcp-server / fastgpt-aiproxy(-pg)
+  #      / opensandbox-server / fastgpt-volume-manager / fastgpt-minio
+  #      are NOT deployed. The features they enable (workflow code nodes,
+  #      MCP, AI proxy, agent sandbox) are explicitly out of Phase 0
+  #      scope (TASK-07 → 退出条件 #5 only requires RAG end-to-end).
+  #      Reintroduce in a Phase 1+ task if those features are activated.
+  #   5. fastgpt-app's depends_on is patched to drop the skipped services;
+  #      its env vars CODE_SANDBOX_URL / AIPROXY_API_ENDPOINT /
+  #      AGENT_SANDBOX_* are blanked so FastGPT does not call missing
+  #      endpoints during the RAG path. PLUGIN_BASE_URL points at the
+  #      vendored fastgpt-plugin container.
+  #   6. fastgpt-app image: ghcr.io/labring/fastgpt:v4.14.10.2 — exactly
+  #      what the v4.14.12 git tag pins in upstream compose. errata-04
+  #      proposed (Pane 5 review) to reconcile versions-locked.
+  # =====================================================================
+
+  # -------------------------------------------------------------------
+  # fastgpt-mongo : metadata store + change-stream replSet (rs0)
+  #   Vendored verbatim from upstream compose: bash entrypoint generates
+  #   /data/mongodb.key (openssl rand 128) on first boot, then runs
+  #   mongod --keyFile --replSet rs0 and rs.initiate() on a single member.
+  # -------------------------------------------------------------------
+  fastgpt-mongo:
+    image: mongo:${MONGO_IMAGE_TAG:-5.0.32}
+    container_name: ncmu-fastgpt-mongo
+    restart: unless-stopped
+    command: mongod --keyFile /data/mongodb.key --replSet rs0
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${FASTGPT_MONGO_USER:-fastgpt}
+      MONGO_INITDB_ROOT_PASSWORD: ${FASTGPT_MONGO_PASSWORD:-CHANGE_ME}
+    volumes:
+      - fastgpt-mongo-data:/data/db
+    entrypoint:
+      - bash
+      - -c
+      - |
+        if [ ! -f /data/mongodb.key ]; then
+          openssl rand -base64 128 > /data/mongodb.key
+          chmod 400 /data/mongodb.key
+          chown 999:999 /data/mongodb.key
+        fi
+        echo 'const isInited = rs.status().ok === 1
+        if(!isInited){
+          rs.initiate({
+              _id: "rs0",
+              members: [
+                  { _id: 0, host: "fastgpt-mongo:27017" }
+              ]
+          })
+        }' > /data/initReplicaSet.js
+        exec docker-entrypoint.sh "$$@" &
+        until mongo -u "${FASTGPT_MONGO_USER:-fastgpt}" -p "${FASTGPT_MONGO_PASSWORD:-CHANGE_ME}" --authenticationDatabase admin --eval "print('waited for connection')"; do
+          echo "Waiting for MongoDB to start..."
+          sleep 2
+        done
+        mongo -u "${FASTGPT_MONGO_USER:-fastgpt}" -p "${FASTGPT_MONGO_PASSWORD:-CHANGE_ME}" --authenticationDatabase admin /data/initReplicaSet.js
+        wait $$!
+    healthcheck:
+      test:
+        - CMD
+        - mongo
+        - -u
+        - ${FASTGPT_MONGO_USER:-fastgpt}
+        - -p
+        - ${FASTGPT_MONGO_PASSWORD:-CHANGE_ME}
+        - --authenticationDatabase
+        - admin
+        - --eval
+        - db.adminCommand('ping')
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      default:
+        aliases:
+          - fastgpt-mongo
+
+  # -------------------------------------------------------------------
+  # embedding-tei : Hugging Face Text Embeddings Inference (CPU build)
+  #   Loads BAAI/bge-large-zh-v1.5 (~1.3 GiB) on first boot and caches
+  #   weights in the tei-models named volume. Subsequent restarts skip
+  #   the download.
+  #   FastGPT calls TEI via FASTGPT_EMBEDDING_BASE_URL (default http://tei:80).
+  # -------------------------------------------------------------------
+  embedding-tei:
+    image: ghcr.io/huggingface/text-embeddings-inference:${TEI_IMAGE_TAG:-cpu-latest}
+    container_name: ncmu-embedding-tei
+    restart: unless-stopped
+    command:
+      - --model-id
+      - ${TEI_MODEL_ID:-BAAI/bge-large-zh-v1.5}
+      - --port
+      - "80"
+    volumes:
+      - tei-models:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      # First boot pulls BAAI/bge-large-zh-v1.5 weights from HuggingFace
+      # (~1.3 GiB pytorch_model.bin since the repo lacks ONNX/safetensors).
+      # Allow up to 10 min on cold cache; subsequent restarts are seconds.
+      start_period: 600s
+    networks:
+      default:
+        aliases:
+          - tei
+
+  # -------------------------------------------------------------------
+  # fastgpt-plugin : FastGPT model registry / plugin runtime
+  #   Required by fastgpt-app's init-time call to /api/models/get-providers
+  #   (smoke test showed init hard-fails without this server). Reuses
+  #   NCMU mongo/redis; STORAGE_* points at the host MinIO. fastgpt-minio
+  #   depends_on dropped (Phase 0 dev environment uses external MinIO).
+  # -------------------------------------------------------------------
+  fastgpt-plugin:
+    image: ghcr.io/labring/fastgpt-plugin:${FASTGPT_PLUGIN_IMAGE_TAG:-v0.5.6}
+    container_name: ncmu-fastgpt-plugin
+    restart: unless-stopped
+    depends_on:
+      fastgpt-mongo:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      AUTH_TOKEN: ${FASTGPT_PLUGIN_TOKEN:-CHANGE_ME}
+      MONGODB_URI: mongodb://${FASTGPT_MONGO_USER:-fastgpt}:${FASTGPT_MONGO_PASSWORD:-CHANGE_ME}@fastgpt-mongo:27017/fastgpt?authSource=admin
+      DB_MAX_LINK: ${FASTGPT_DB_MAX_LINK:-100}
+      REDIS_URL: redis://${REDIS_HOST:-redis}:${REDIS_PORT:-6379}/${FASTGPT_REDIS_DB:-2}
+      STORAGE_VENDOR: ${FASTGPT_STORAGE_VENDOR:-minio}
+      STORAGE_REGION: ${FASTGPT_STORAGE_REGION:-us-east-1}
+      STORAGE_ACCESS_KEY_ID: ${FASTGPT_STORAGE_ACCESS_KEY_ID:-CHANGE_ME}
+      STORAGE_SECRET_ACCESS_KEY: ${FASTGPT_STORAGE_SECRET_ACCESS_KEY:-CHANGE_ME}
+      STORAGE_PUBLIC_BUCKET: ${FASTGPT_STORAGE_PUBLIC_BUCKET:-fastgpt-public}
+      STORAGE_PRIVATE_BUCKET: ${FASTGPT_STORAGE_PRIVATE_BUCKET:-fastgpt-private}
+      STORAGE_S3_ENDPOINT: ${FASTGPT_STORAGE_S3_ENDPOINT:-http://host.docker.internal:9000}
+      STORAGE_EXTERNAL_ENDPOINT: ${STORAGE_EXTERNAL_ENDPOINT:-http://host.docker.internal:9000}
+      STORAGE_S3_FORCE_PATH_STYLE: "true"
+      STORAGE_S3_MAX_RETRIES: "3"
+      SERVICE_REQUEST_MAX_CONTENT_LENGTH: "10"
+      MAX_API_SIZE: "10"
+      LOG_OTEL_SERVICE_NAME: fastgpt-plugin
+      LOG_ENABLE_OTEL: "false"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    networks:
+      default:
+        aliases:
+          - fastgpt-plugin
+
+  # -------------------------------------------------------------------
+  # fastgpt-app : main FastGPT API + admin console
+  #   image tracks upstream literal pin (v4.14.10.2 inside v4.14.12
+  #   compose). depends_on stripped of code-sandbox / minio (deviation
+  #   #4b-#5 above); fastgpt-plugin IS required.
+  # -------------------------------------------------------------------
+  fastgpt-app:
+    image: ghcr.io/labring/fastgpt:${FASTGPT_IMAGE_TAG:-v4.14.10.2}
+    container_name: ncmu-fastgpt-app
+    restart: unless-stopped
+    depends_on:
+      pg-fastgpt:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      fastgpt-mongo:
+        condition: service_healthy
+      embedding-tei:
+        condition: service_healthy
+      fastgpt-plugin:
+        condition: service_healthy
+    ports:
+      - "${FASTGPT_PORT:-3000}:3000"
+    environment:
+      HOSTNAME: 0.0.0.0
+      # --- DB : NCMU pg-fastgpt with pgvector ---
+      PG_URL: postgresql://${FASTGPT_DB_USER:-fastgpt}:${FASTGPT_DB_PASSWORD:-CHANGE_ME}@${FASTGPT_DB_HOST:-pg-fastgpt}:${FASTGPT_DB_PORT:-5432}/${FASTGPT_DB_NAME:-fastgpt}
+      # --- Mongo (single replSet rs0) ---
+      MONGODB_URI: mongodb://${FASTGPT_MONGO_USER:-fastgpt}:${FASTGPT_MONGO_PASSWORD:-CHANGE_ME}@fastgpt-mongo:27017/fastgpt?authSource=admin
+      DB_MAX_LINK: ${FASTGPT_DB_MAX_LINK:-100}
+      # --- Redis : NCMU redis at DB 2 (no requirepass) ---
+      REDIS_URL: redis://${REDIS_HOST:-redis}:${REDIS_PORT:-6379}/${FASTGPT_REDIS_DB:-2}
+      # --- Object storage : host MinIO via host.docker.internal ---
+      STORAGE_VENDOR: ${FASTGPT_STORAGE_VENDOR:-minio}
+      STORAGE_REGION: ${FASTGPT_STORAGE_REGION:-us-east-1}
+      STORAGE_ACCESS_KEY_ID: ${FASTGPT_STORAGE_ACCESS_KEY_ID:-CHANGE_ME}
+      STORAGE_SECRET_ACCESS_KEY: ${FASTGPT_STORAGE_SECRET_ACCESS_KEY:-CHANGE_ME}
+      STORAGE_PUBLIC_BUCKET: ${FASTGPT_STORAGE_PUBLIC_BUCKET:-fastgpt-public}
+      STORAGE_PRIVATE_BUCKET: ${FASTGPT_STORAGE_PRIVATE_BUCKET:-fastgpt-private}
+      STORAGE_EXTERNAL_ENDPOINT: ${STORAGE_EXTERNAL_ENDPOINT:-http://host.docker.internal:9000}
+      STORAGE_S3_ENDPOINT: ${FASTGPT_STORAGE_S3_ENDPOINT:-http://host.docker.internal:9000}
+      STORAGE_S3_FORCE_PATH_STYLE: "true"
+      STORAGE_S3_MAX_RETRIES: "3"
+      # --- FastGPT root account + system keys ---
+      ROOT_KEY: ${FASTGPT_ROOT_KEY:-CHANGE_ME}
+      DEFAULT_ROOT_PSW: ${FASTGPT_DEFAULT_ROOT_PSW:-CHANGE_ME}
+      TOKEN_KEY: ${FASTGPT_TOKEN_KEY:-CHANGE_ME}
+      FILE_TOKEN_KEY: ${FASTGPT_FILE_TOKEN_KEY:-CHANGE_ME}
+      AES256_SECRET_KEY: ${FASTGPT_AES256_SECRET_KEY:-CHANGE_ME}
+      # --- Embedding worker : in-cluster TEI ---
+      # FastGPT does NOT have a single env var for the embedding endpoint;
+      # the embedding model + base_url are configured via /app/data/config.json
+      # at runtime (see docker/fastgpt/config.json comment) AND via the
+      # admin console "Model Provider" page after first boot. The defaults
+      # below are picked up by the FastGPT v4.14.x model registry on first
+      # run.
+      DEFAULT_EMBEDDING_MODEL: ${FASTGPT_EMBEDDING_MODEL:-bge-large-zh-v1.5}
+      DEFAULT_EMBEDDING_BASE_URL: ${FASTGPT_EMBEDDING_BASE_URL:-http://tei:80}
+      # --- LLM : external MiniMax (per prerequisites §6) ---
+      DEFAULT_CHAT_MODEL: ${FASTGPT_LLM_MODEL:-MiniMax-M2.7}
+      DEFAULT_CHAT_BASE_URL: ${FASTGPT_LLM_BASE_URL:-http://111.172.214.40:32086/v1}
+      DEFAULT_CHAT_API_KEY: ${FASTGPT_LLM_API_KEY:-CHANGE_ME}
+      # --- Plugin server (model registry + plugin marketplace) ---
+      PLUGIN_BASE_URL: ${FASTGPT_PLUGIN_BASE_URL:-http://fastgpt-plugin:3000}
+      PLUGIN_TOKEN: ${FASTGPT_PLUGIN_TOKEN:-CHANGE_ME}
+      # --- Telemetry / runtime tuning ---
+      FE_DOMAIN: ${FASTGPT_FE_DOMAIN:-http://localhost:3000}
+      SYNC_INDEX: "1"
+      LOG_OTEL_SERVICE_NAME: fastgpt-client
+      LOG_ENABLE_OTEL: "false"
+      USE_IP_LIMIT: "false"
+      WORKFLOW_MAX_RUN_TIMES: "1000"
+      WORKFLOW_MAX_LOOP_TIMES: "100"
+      SERVICE_REQUEST_MAX_CONTENT_LENGTH: "10"
+      CHECK_INTERNAL_IP: "false"
+      UPLOAD_FILE_MAX_SIZE: "1000"
+      UPLOAD_FILE_MAX_AMOUNT: "1000"
+      LLM_REQUEST_TRACKING_RETENTION_HOURS: "6"
+      MULTIPLE_DATA_TO_BASE64: "true"
+      MAX_HTML_TRANSFORM_CHARS: "1000000"
+      ALLOWED_ORIGINS: ${FASTGPT_ALLOWED_ORIGINS:-}
+      # --- Disabled features (Phase 0 scope) ---
+      # PLUGIN_BASE_URL / CODE_SANDBOX_URL / AIPROXY_API_ENDPOINT /
+      # AGENT_SANDBOX_OPENSANDBOX_BASEURL / AGENT_SANDBOX_VOLUME_MANAGER_URL
+      # are intentionally left unset so FastGPT does not attempt to call
+      # services that are not deployed in Phase 0 (deviation #4 above).
+    volumes:
+      - ./docker/fastgpt/config.json:/app/data/config.json:ro
+    networks:
+      default:
+        aliases:
+          - fastgpt
+          - fastgpt-app
+
 networks:
   default:
     name: ncmu-net
@@ -484,3 +756,5 @@ volumes:
   dify-plugin-daemon-storage:
   dify-sandbox-deps:
   dify-sandbox-conf:
+  fastgpt-mongo-data:
+  tei-models:
