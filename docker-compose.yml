@@ -110,3 +110,397 @@ services:
       retries: 5
       start_period: 5s
     restart: unless-stopped
+
+  # =====================================================================
+  # Dify v1.13.3 services (TASK-06)
+  # ---------------------------------------------------------------------
+  # Upstream reference :
+  #   https://github.com/langgenius/dify/blob/1.13.3/docker/docker-compose.yaml
+  # NCMU-specific deviations from upstream:
+  #   1. Drop Dify's built-in db_postgres (profile-gated). Dify api/worker/
+  #      worker_beat/plugin_daemon connect to NCMU's pg-dify instead.
+  #   2. Drop Dify's built-in redis service. All Dify components connect to
+  #      NCMU's redis at DB index 1 (CELERY_BROKER_URL / REDIS_DB=1).
+  #   3. NCMU container names keep the `ncmu-` prefix (TASK-05 convention).
+  #   4. Dify-internal configs (nginx/squid templates) vendored under
+  #      ./docker/dify/{nginx,ssrf_proxy}/ so this compose is self-contained.
+  #   5. Application storage uses named volumes (NTFS-safe per
+  #      prerequisites-2026-04-21.md §2; Dify's init_permissions chown:1001
+  #      would fail on /mnt/d bind mount identical to the postgres initdb
+  #      path, see TASK-03 §2 repro).
+  #   6. Exposed host ports:
+  #        - dify-nginx : ${DIFY_PORT:-8080} → console + /v1 API
+  #        - dify-plugin-daemon debug : 5003 (Dify dev feature, kept local)
+  #      No other Dify internals are host-exposed.
+  # The Dify-specific env defaults live in the DIFY section of .env.example;
+  # Dify's sprawling shared config (~500 env vars) is left at upstream
+  # defaults via `:-` fallbacks baked into the upstream image.
+  # =====================================================================
+
+  # -------------------------------------------------------------------
+  # dify-init-permissions : one-shot chown of the shared storage volume
+  #   Upstream container `init_permissions` (chown -R 1001:1001 …). Must
+  #   run before dify-api/worker/worker_beat so they can write /app/api/storage.
+  # -------------------------------------------------------------------
+  dify-init-permissions:
+    image: busybox:latest
+    container_name: ncmu-dify-init-permissions
+    command:
+      - sh
+      - -c
+      - |
+        FLAG_FILE="/app/api/storage/.init_permissions"
+        if [ -f "$${FLAG_FILE}" ]; then
+          echo "Permissions already initialized. Exiting."
+          exit 0
+        fi
+        echo "Initializing permissions for /app/api/storage"
+        chown -R 1001:1001 /app/api/storage && touch "$${FLAG_FILE}"
+        echo "Permissions initialized. Exiting."
+    volumes:
+      - dify-app-storage:/app/api/storage
+    restart: "no"
+
+  # -------------------------------------------------------------------
+  # dify-init-plugin-db : one-shot creation of the `dify_plugin` database
+  #   plugin_daemon expects a separate DB from the main `dify` DB. Since
+  #   NCMU's init-db/02-pg-dify.sql is immutable under TASK-06 scope, we
+  #   create the plugin DB with an idempotent psql call after pg-dify is
+  #   healthy. Fails closed if pg-dify is unreachable.
+  # -------------------------------------------------------------------
+  dify-init-plugin-db:
+    image: postgres:${PG_IMAGE_TAG:-16-alpine}
+    container_name: ncmu-dify-init-plugin-db
+    depends_on:
+      pg-dify:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: ${DIFY_DB_PASSWORD:-CHANGE_ME}
+    entrypoint:
+      - sh
+      - -c
+      - |
+        set -e
+        DB="${DIFY_DB_PLUGIN_DATABASE:-dify_plugin}"
+        USER="${DIFY_DB_USER:-dify}"
+        existing=$$(psql -h pg-dify -U "$$USER" -d "${DIFY_DB_NAME:-dify}" -tAc "SELECT 1 FROM pg_database WHERE datname='$$DB'")
+        if [ "$$existing" = "1" ]; then
+          echo "[OK] database $$DB already exists"
+        else
+          echo "[CREATE] database $$DB"
+          psql -h pg-dify -U "$$USER" -d postgres -c "CREATE DATABASE $$DB OWNER $$USER"
+        fi
+    restart: "no"
+
+  # -------------------------------------------------------------------
+  # dify-api : REST + console API (MODE=api)
+  # -------------------------------------------------------------------
+  dify-api: &dify-api-common
+    image: langgenius/dify-api:${DIFY_IMAGE_TAG:-1.13.3}
+    container_name: ncmu-dify-api
+    restart: unless-stopped
+    environment: &dify-api-env
+      MODE: api
+      LOG_LEVEL: ${DIFY_LOG_LEVEL:-INFO}
+      SECRET_KEY: ${DIFY_SECRET_KEY:-CHANGE_ME}
+      INIT_PASSWORD: ${DIFY_INIT_PASSWORD:-}
+      DEPLOY_ENV: ${DIFY_DEPLOY_ENV:-PRODUCTION}
+      CONSOLE_API_URL: ${DIFY_CONSOLE_API_URL:-}
+      CONSOLE_WEB_URL: ${DIFY_CONSOLE_WEB_URL:-}
+      SERVICE_API_URL: ${DIFY_SERVICE_API_URL:-}
+      APP_API_URL: ${DIFY_APP_API_URL:-}
+      APP_WEB_URL: ${DIFY_APP_WEB_URL:-}
+      FILES_URL: ${DIFY_FILES_URL:-}
+      MIGRATION_ENABLED: "true"
+      # --- DB : NCMU pg-dify (override upstream db_postgres default) ---
+      DB_USERNAME: ${DIFY_DB_USER:-dify}
+      DB_PASSWORD: ${DIFY_DB_PASSWORD:-CHANGE_ME}
+      DB_HOST: ${DIFY_DB_HOST:-pg-dify}
+      DB_PORT: ${DIFY_DB_PORT:-5432}
+      DB_DATABASE: ${DIFY_DB_NAME:-dify}
+      # --- Redis : NCMU redis, DB index 1 (NCMU backend uses 0) ---
+      REDIS_HOST: ${REDIS_HOST:-redis}
+      REDIS_PORT: ${REDIS_PORT:-6379}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      REDIS_DB: ${DIFY_REDIS_DB:-1}
+      CELERY_BROKER_URL: ${DIFY_CELERY_BROKER_URL:-redis://redis:6379/1}
+      # --- Vector store : weaviate (Dify upstream default) ---
+      VECTOR_STORE: ${DIFY_VECTOR_STORE:-weaviate}
+      WEAVIATE_ENDPOINT: ${WEAVIATE_ENDPOINT:-http://dify-weaviate:8080}
+      WEAVIATE_API_KEY: ${WEAVIATE_API_KEY:-CHANGE_ME}
+      # --- Sandbox (code execution) ---
+      CODE_EXECUTION_ENDPOINT: ${CODE_EXECUTION_ENDPOINT:-http://dify-sandbox:8194}
+      CODE_EXECUTION_API_KEY: ${DIFY_SANDBOX_API_KEY:-CHANGE_ME}
+      # --- SSRF proxy (workflow nodes fetching external URLs) ---
+      SSRF_PROXY_HTTP_URL: ${SSRF_PROXY_HTTP_URL:-http://dify-ssrf-proxy:3128}
+      SSRF_PROXY_HTTPS_URL: ${SSRF_PROXY_HTTPS_URL:-http://dify-ssrf-proxy:3128}
+      # --- Plugin daemon handshake ---
+      PLUGIN_DAEMON_URL: ${PLUGIN_DAEMON_URL:-http://dify-plugin-daemon:5002}
+      PLUGIN_DAEMON_KEY: ${DIFY_PLUGIN_DAEMON_KEY:-CHANGE_ME}
+      PLUGIN_DIFY_INNER_API_URL: ${PLUGIN_DIFY_INNER_API_URL:-http://dify-api:5001}
+      INNER_API_KEY_FOR_PLUGIN: ${DIFY_PLUGIN_INNER_API_KEY:-CHANGE_ME}
+      PLUGIN_REMOTE_INSTALL_HOST: ${EXPOSE_PLUGIN_DEBUGGING_HOST:-localhost}
+      PLUGIN_REMOTE_INSTALL_PORT: ${EXPOSE_PLUGIN_DEBUGGING_PORT:-5003}
+    depends_on:
+      pg-dify:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      dify-init-permissions:
+        condition: service_completed_successfully
+      dify-init-plugin-db:
+        condition: service_completed_successfully
+    volumes:
+      - dify-app-storage:/app/api/storage
+    networks:
+      default:
+        # Alias `api` matches the upstream-vendored nginx template
+        # (docker/dify/nginx/conf.d/default.conf.template). Keeping the
+        # alias means the template file is a verbatim copy of upstream.
+        aliases:
+          - api
+      dify-ssrf-net: {}
+
+  # -------------------------------------------------------------------
+  # dify-worker : Celery worker (MODE=worker)
+  # -------------------------------------------------------------------
+  dify-worker:
+    <<: *dify-api-common
+    container_name: ncmu-dify-worker
+    environment:
+      <<: *dify-api-env
+      MODE: worker
+    networks:
+      default: {}
+      dify-ssrf-net: {}
+
+  # -------------------------------------------------------------------
+  # dify-worker-beat : Celery beat scheduler (MODE=beat)
+  # -------------------------------------------------------------------
+  dify-worker-beat:
+    <<: *dify-api-common
+    container_name: ncmu-dify-worker-beat
+    environment:
+      <<: *dify-api-env
+      MODE: beat
+    volumes: []        # beat does not need app storage
+    networks:
+      default: {}
+      dify-ssrf-net: {}
+
+  # -------------------------------------------------------------------
+  # dify-web : Next.js frontend (console + app)
+  # -------------------------------------------------------------------
+  dify-web:
+    image: langgenius/dify-web:${DIFY_WEB_IMAGE_TAG:-1.13.3}
+    container_name: ncmu-dify-web
+    restart: unless-stopped
+    environment:
+      CONSOLE_API_URL: ${DIFY_CONSOLE_API_URL:-}
+      APP_API_URL: ${DIFY_APP_API_URL:-}
+      NEXT_TELEMETRY_DISABLED: ${NEXT_TELEMETRY_DISABLED:-1}
+      MARKETPLACE_API_URL: ${MARKETPLACE_API_URL:-https://marketplace.dify.ai}
+      MARKETPLACE_URL: ${MARKETPLACE_URL:-https://marketplace.dify.ai}
+    networks:
+      default:
+        # Alias `web` matches upstream nginx template (see dify-api note).
+        aliases:
+          - web
+
+  # -------------------------------------------------------------------
+  # dify-sandbox : secure code execution runner (DifySandbox 0.2.14)
+  #   Isolated on dify-ssrf-net; its egress only via dify-ssrf-proxy.
+  # -------------------------------------------------------------------
+  dify-sandbox:
+    image: langgenius/dify-sandbox:${DIFY_SANDBOX_IMAGE_TAG:-0.2.14}
+    container_name: ncmu-dify-sandbox
+    restart: unless-stopped
+    environment:
+      API_KEY: ${DIFY_SANDBOX_API_KEY:-CHANGE_ME}
+      GIN_MODE: ${DIFY_SANDBOX_GIN_MODE:-release}
+      WORKER_TIMEOUT: ${DIFY_SANDBOX_WORKER_TIMEOUT:-15}
+      ENABLE_NETWORK: ${DIFY_SANDBOX_ENABLE_NETWORK:-true}
+      HTTP_PROXY: ${DIFY_SANDBOX_HTTP_PROXY:-http://dify-ssrf-proxy:3128}
+      HTTPS_PROXY: ${DIFY_SANDBOX_HTTPS_PROXY:-http://dify-ssrf-proxy:3128}
+      SANDBOX_PORT: ${DIFY_SANDBOX_PORT:-8194}
+      PIP_MIRROR_URL: ${DIFY_PIP_MIRROR_URL:-}
+    volumes:
+      - dify-sandbox-deps:/dependencies
+      - dify-sandbox-conf:/conf
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8194/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    networks:
+      - dify-ssrf-net
+
+  # -------------------------------------------------------------------
+  # dify-plugin-daemon : plugin runtime (NEW in Dify v1.x)
+  #   Connects to pg-dify using a SEPARATE database `dify_plugin` (see
+  #   dify-init-plugin-db above).
+  # -------------------------------------------------------------------
+  dify-plugin-daemon:
+    image: langgenius/dify-plugin-daemon:${DIFY_PLUGIN_DAEMON_IMAGE_TAG:-0.5.3-local}
+    container_name: ncmu-dify-plugin-daemon
+    restart: unless-stopped
+    environment:
+      # DB
+      DB_USERNAME: ${DIFY_DB_USER:-dify}
+      DB_PASSWORD: ${DIFY_DB_PASSWORD:-CHANGE_ME}
+      DB_HOST: ${DIFY_DB_HOST:-pg-dify}
+      DB_PORT: ${DIFY_DB_PORT:-5432}
+      DB_DATABASE: ${DIFY_DB_PLUGIN_DATABASE:-dify_plugin}
+      # Redis
+      REDIS_HOST: ${REDIS_HOST:-redis}
+      REDIS_PORT: ${REDIS_PORT:-6379}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      REDIS_DB: ${DIFY_REDIS_DB:-1}
+      # Daemon handshake
+      SERVER_PORT: ${PLUGIN_DAEMON_PORT:-5002}
+      SERVER_KEY: ${DIFY_PLUGIN_DAEMON_KEY:-CHANGE_ME}
+      DIFY_INNER_API_URL: ${PLUGIN_DIFY_INNER_API_URL:-http://dify-api:5001}
+      DIFY_INNER_API_KEY: ${DIFY_PLUGIN_INNER_API_KEY:-CHANGE_ME}
+      PLUGIN_REMOTE_INSTALLING_HOST: ${PLUGIN_DEBUGGING_HOST:-0.0.0.0}
+      PLUGIN_REMOTE_INSTALLING_PORT: ${PLUGIN_DEBUGGING_PORT:-5003}
+      PLUGIN_WORKING_PATH: ${PLUGIN_WORKING_PATH:-/app/storage/cwd}
+      FORCE_VERIFYING_SIGNATURE: ${DIFY_FORCE_VERIFYING_SIGNATURE:-true}
+      PYTHON_ENV_INIT_TIMEOUT: ${PLUGIN_PYTHON_ENV_INIT_TIMEOUT:-120}
+      PLUGIN_MAX_EXECUTION_TIMEOUT: ${PLUGIN_MAX_EXECUTION_TIMEOUT:-600}
+      PLUGIN_STORAGE_TYPE: ${PLUGIN_STORAGE_TYPE:-local}
+      PLUGIN_STORAGE_LOCAL_ROOT: ${PLUGIN_STORAGE_LOCAL_ROOT:-/app/storage}
+      PLUGIN_INSTALLED_PATH: ${PLUGIN_INSTALLED_PATH:-plugin}
+      PLUGIN_PACKAGE_CACHE_PATH: ${PLUGIN_PACKAGE_CACHE_PATH:-plugin_packages}
+      PLUGIN_MEDIA_CACHE_PATH: ${PLUGIN_MEDIA_CACHE_PATH:-assets}
+      PIP_MIRROR_URL: ${DIFY_PIP_MIRROR_URL:-}
+    ports:
+      - "${EXPOSE_PLUGIN_DEBUGGING_PORT:-5003}:${PLUGIN_DEBUGGING_PORT:-5003}"
+    volumes:
+      - dify-plugin-daemon-storage:/app/storage
+    depends_on:
+      pg-dify:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      dify-init-plugin-db:
+        condition: service_completed_successfully
+    networks:
+      default:
+        # Alias `plugin_daemon` matches upstream nginx template (/e/ route).
+        aliases:
+          - plugin_daemon
+
+  # -------------------------------------------------------------------
+  # dify-ssrf-proxy : squid egress proxy for the code sandbox
+  #   Upstream convention: sandbox and api/worker share this network so
+  #   internal cluster traffic bypasses the proxy, but sandbox's external
+  #   requests must go through it.
+  # -------------------------------------------------------------------
+  dify-ssrf-proxy:
+    image: ubuntu/squid:latest
+    container_name: ncmu-dify-ssrf-proxy
+    restart: unless-stopped
+    environment:
+      HTTP_PORT: ${SSRF_HTTP_PORT:-3128}
+      COREDUMP_DIR: ${SSRF_COREDUMP_DIR:-/var/spool/squid}
+      REVERSE_PROXY_PORT: ${SSRF_REVERSE_PROXY_PORT:-8194}
+      SANDBOX_HOST: ${SSRF_SANDBOX_HOST:-dify-sandbox}
+      SANDBOX_PORT: ${DIFY_SANDBOX_PORT:-8194}
+    volumes:
+      - ./docker/dify/ssrf_proxy/squid.conf.template:/etc/squid/squid.conf.template
+      - ./docker/dify/ssrf_proxy/docker-entrypoint.sh:/docker-entrypoint-mount.sh
+    entrypoint:
+      - sh
+      - -c
+      - "cp /docker-entrypoint-mount.sh /docker-entrypoint.sh && sed -i 's/\\r$$//' /docker-entrypoint.sh && chmod +x /docker-entrypoint.sh && /docker-entrypoint.sh"
+    networks:
+      - default
+      - dify-ssrf-net
+
+  # -------------------------------------------------------------------
+  # dify-nginx : internal reverse proxy in front of dify-api + dify-web
+  #   Exposed on host ${DIFY_PORT:-8080}. TASK-09's outer NCMU nginx
+  #   (Phase 0 batch 4) will reverse-proxy this port onwards.
+  # -------------------------------------------------------------------
+  dify-nginx:
+    image: nginx:${DIFY_NGINX_IMAGE_TAG:-latest}
+    container_name: ncmu-dify-nginx
+    restart: unless-stopped
+    environment:
+      NGINX_SERVER_NAME: ${DIFY_NGINX_SERVER_NAME:-_}
+      NGINX_HTTPS_ENABLED: "false"
+      NGINX_PORT: ${DIFY_NGINX_INTERNAL_PORT:-80}
+      NGINX_SSL_PORT: "443"
+      NGINX_SSL_CERT_FILENAME: dify.crt
+      NGINX_SSL_CERT_KEY_FILENAME: dify.key
+      NGINX_SSL_PROTOCOLS: "TLSv1.2 TLSv1.3"
+      NGINX_WORKER_PROCESSES: auto
+      NGINX_CLIENT_MAX_BODY_SIZE: ${NGINX_CLIENT_MAX_BODY_SIZE:-100M}
+      NGINX_KEEPALIVE_TIMEOUT: "65"
+      NGINX_PROXY_READ_TIMEOUT: 3600s
+      NGINX_PROXY_SEND_TIMEOUT: 3600s
+      NGINX_ENABLE_CERTBOT_CHALLENGE: "false"
+      CERTBOT_DOMAIN: ""
+    volumes:
+      # Mount individual template files so the envsubst-generated
+      # {nginx.conf, proxy.conf, conf.d/default.conf} stay inside the
+      # container overlay and don't leak back to the host source tree.
+      - ./docker/dify/nginx/nginx.conf.template:/etc/nginx/nginx.conf.template:ro
+      - ./docker/dify/nginx/proxy.conf.template:/etc/nginx/proxy.conf.template:ro
+      - ./docker/dify/nginx/https.conf.template:/etc/nginx/https.conf.template:ro
+      - ./docker/dify/nginx/conf.d/default.conf.template:/etc/nginx/conf.d/default.conf.template:ro
+      - ./docker/dify/nginx/docker-entrypoint.sh:/docker-entrypoint-mount.sh:ro
+    entrypoint:
+      - sh
+      - -c
+      - "cp /docker-entrypoint-mount.sh /docker-entrypoint.sh && sed -i 's/\\r$$//' /docker-entrypoint.sh && chmod +x /docker-entrypoint.sh && /docker-entrypoint.sh"
+    depends_on:
+      - dify-api
+      - dify-web
+    ports:
+      - "${DIFY_PORT:-8080}:${DIFY_NGINX_INTERNAL_PORT:-80}"
+    networks:
+      - default
+
+  # -------------------------------------------------------------------
+  # dify-weaviate : default vector store for Dify knowledge indexing.
+  #   NCMU keeps KB content in FastGPT (batch 3 TASK-07), but Dify still
+  #   requires a reachable VECTOR_STORE for dataset bootstrap on startup.
+  # -------------------------------------------------------------------
+  dify-weaviate:
+    image: semitechnologies/weaviate:${WEAVIATE_IMAGE_TAG:-1.27.0}
+    container_name: ncmu-dify-weaviate
+    restart: unless-stopped
+    environment:
+      PERSISTENCE_DATA_PATH: /var/lib/weaviate
+      QUERY_DEFAULTS_LIMIT: "25"
+      AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: "false"
+      DEFAULT_VECTORIZER_MODULE: none
+      CLUSTER_HOSTNAME: node1
+      AUTHENTICATION_APIKEY_ENABLED: "true"
+      AUTHENTICATION_APIKEY_ALLOWED_KEYS: ${WEAVIATE_API_KEY:-CHANGE_ME}
+      AUTHENTICATION_APIKEY_USERS: ${WEAVIATE_API_USER:-ncmu@local}
+      AUTHORIZATION_ADMINLIST_ENABLED: "true"
+      AUTHORIZATION_ADMINLIST_USERS: ${WEAVIATE_API_USER:-ncmu@local}
+      DISABLE_TELEMETRY: "true"
+    volumes:
+      - dify-weaviate-data:/var/lib/weaviate
+    networks:
+      - default
+
+networks:
+  default:
+    name: ncmu-net
+    driver: bridge
+  dify-ssrf-net:
+    name: ncmu-dify-ssrf-net
+    driver: bridge
+    internal: true
+
+volumes:
+  dify-app-storage:
+  dify-plugin-daemon-storage:
+  dify-sandbox-deps:
+  dify-sandbox-conf:
+  dify-weaviate-data:
