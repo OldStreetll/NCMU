@@ -1,0 +1,112 @@
+# =====================================================================
+# NCMU v3.3.1 — base docker-compose
+# =====================================================================
+# Scope of this file (TASK-05): three postgres instances + one redis.
+# Subsequent tasks append additional services to this same file:
+#   TASK-06 → dify-api / dify-worker / dify-web / dify-sandbox
+#   TASK-07 → fastgpt-api / fastgpt-mongo / tei (embedding worker)
+#   TASK-09 → nginx
+#
+# Image tags are sourced from .env (see PG_IMAGE_TAG, REDIS_IMAGE_TAG).
+# Authoritative version pin: NCMU-Wiki/sources/phase0/versions-locked-2026-04-21.md
+#
+# Volume strategy (see prerequisites-2026-04-21.md §2):
+#   * Base: bind mounts under ./data/ (Linux-host friendly, browsable)
+#   * Override (Windows/WSL2 NTFS): named volumes via
+#     docker-compose.override.yaml (cp from .example).
+# =====================================================================
+
+services:
+
+  # -------------------------------------------------------------------
+  # pg-ncmu : NCMU backend DB (Phase 1+) and v3.3 Dify-integration tables
+  # -------------------------------------------------------------------
+  pg-ncmu:
+    image: postgres:${PG_IMAGE_TAG:-16-alpine}
+    container_name: ncmu-pg-ncmu
+    environment:
+      POSTGRES_USER: ${NCMU_DB_USER:-ncmu_app}
+      POSTGRES_PASSWORD: ${NCMU_APP_PASSWORD:-CHANGE_ME}
+      POSTGRES_DB: ${NCMU_DB_NAME:-ncmu}
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./data/pg-ncmu:/var/lib/postgresql/data
+      - ./docker/init-db/01-pg-ncmu.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${NCMU_DB_USER:-ncmu_app} -d ${NCMU_DB_NAME:-ncmu}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  # -------------------------------------------------------------------
+  # pg-dify : Dify metadata DB (apps / conversations / datasets / etc.)
+  # -------------------------------------------------------------------
+  pg-dify:
+    image: postgres:${PG_IMAGE_TAG:-16-alpine}
+    container_name: ncmu-pg-dify
+    environment:
+      POSTGRES_USER: ${DIFY_DB_USER:-dify}
+      POSTGRES_PASSWORD: ${DIFY_DB_PASSWORD:-CHANGE_ME}
+      POSTGRES_DB: ${DIFY_DB_NAME:-dify}
+    ports:
+      - "${DIFY_DB_HOST_PORT:-5433}:5432"
+    volumes:
+      - ./data/pg-dify:/var/lib/postgresql/data
+      - ./docker/init-db/02-pg-dify.sql:/docker-entrypoint-initdb.d/02-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DIFY_DB_USER:-dify} -d ${DIFY_DB_NAME:-dify}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  # -------------------------------------------------------------------
+  # pg-fastgpt : FastGPT metadata + pgvector store
+  # -------------------------------------------------------------------
+  # NOTE (TASK-07): replace image with the FastGPT-recommended pgvector
+  # build (PGVECTOR_IMAGE_TAG env, currently CHANGE_ME). The placeholder
+  # below uses postgres:16-alpine so batch 3 can stand up without
+  # blocking on TASK-07's image decision.
+  pg-fastgpt:
+    image: postgres:${PG_IMAGE_TAG:-16-alpine}
+    container_name: ncmu-pg-fastgpt
+    environment:
+      POSTGRES_USER: ${FASTGPT_DB_USER:-fastgpt}
+      POSTGRES_PASSWORD: ${FASTGPT_DB_PASSWORD:-CHANGE_ME}
+      POSTGRES_DB: ${FASTGPT_DB_NAME:-fastgpt}
+    ports:
+      - "${FASTGPT_DB_HOST_PORT:-5434}:5432"
+    volumes:
+      - ./data/pg-fastgpt:/var/lib/postgresql/data
+      - ./docker/init-db/03-pg-fastgpt.sql:/docker-entrypoint-initdb.d/03-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${FASTGPT_DB_USER:-fastgpt} -d ${FASTGPT_DB_NAME:-fastgpt}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  # -------------------------------------------------------------------
+  # redis : single instance, AOF persistence, logical DBs allocated as
+  #         /0 ncmu-backend, /1 Dify, /2 FastGPT (per .env.example).
+  # -------------------------------------------------------------------
+  redis:
+    image: redis:${REDIS_IMAGE_TAG:-7-alpine}
+    container_name: ncmu-redis
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - ./data/redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped

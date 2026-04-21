@@ -7,3 +7,13 @@ __pycache__/
 venv/
 node_modules/
 .DS_Store
+
+# Postgres / Redis bind-mount data dirs (TASK-05 base compose).
+# Treat as ephemeral; never tracked. Override with named volumes
+# on Windows/WSL2 via docker-compose.override.yaml.
+/data/
+
+# Local docker-compose override (cp from .example for NTFS hosts).
+# Per Pane 5 REVIEW-04 COMMENT 2: keep override out of git so each
+# host can choose its own volume strategy.
+docker-compose.override.yaml
