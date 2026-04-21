@@ -11,8 +11,12 @@
 -- DDL. Kept as a placeholder so /docker-entrypoint-initdb.d/ ordering
 -- (01 / 02 / 03) reflects the three pg instances symmetrically.
 --
--- TASK-06 (Dify compose) may add further bootstrap here if needed
--- (e.g. extension prerequisites Dify expects); leave empty for now.
+-- TASK-06-REV (errata-02): pg-dify now runs the pgvector/pgvector:pg16
+-- image so Dify's internal vector store lives on this same instance.
+-- See NCMU-Wiki/sources/phase0/versions-locked-2026-04-21-errata-02.md.
 -- =====================================================================
 
-SELECT 1;  -- no-op so the entrypoint reports success
+-- Dify internal vector store (replaces the dropped dify-weaviate service).
+-- The pgvector extension ships with the pg-dify image; CREATE EXTENSION
+-- enables it for Dify's \c dify session.
+CREATE EXTENSION IF NOT EXISTS vector;

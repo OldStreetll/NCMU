@@ -43,9 +43,11 @@ services:
 
   # -------------------------------------------------------------------
   # pg-dify : Dify metadata DB (apps / conversations / datasets / etc.)
+  #           + Dify internal vector store via pgvector extension
+  #           (per errata-02, replaces the separate Weaviate container).
   # -------------------------------------------------------------------
   pg-dify:
-    image: postgres:${PG_IMAGE_TAG:-16-alpine}
+    image: ${DIFY_PGVECTOR_IMAGE_TAG:-pgvector/pgvector:pg16}
     container_name: ncmu-pg-dify
     environment:
       POSTGRES_USER: ${DIFY_DB_USER:-dify}
@@ -224,10 +226,15 @@ services:
       REDIS_PASSWORD: ${REDIS_PASSWORD:-}
       REDIS_DB: ${DIFY_REDIS_DB:-1}
       CELERY_BROKER_URL: ${DIFY_CELERY_BROKER_URL:-redis://redis:6379/1}
-      # --- Vector store : weaviate (Dify upstream default) ---
-      VECTOR_STORE: ${DIFY_VECTOR_STORE:-weaviate}
-      WEAVIATE_ENDPOINT: ${WEAVIATE_ENDPOINT:-http://dify-weaviate:8080}
-      WEAVIATE_API_KEY: ${WEAVIATE_API_KEY:-CHANGE_ME}
+      # --- Vector store : pgvector on pg-dify (per errata-02) ---
+      VECTOR_STORE: ${DIFY_VECTOR_STORE:-pgvector}
+      PGVECTOR_HOST: ${PGVECTOR_HOST:-pg-dify}
+      PGVECTOR_PORT: ${PGVECTOR_PORT:-5432}
+      PGVECTOR_USER: ${PGVECTOR_USER:-dify}
+      PGVECTOR_PASSWORD: ${PGVECTOR_PASSWORD:-${DIFY_DB_PASSWORD:-CHANGE_ME}}
+      PGVECTOR_DATABASE: ${PGVECTOR_DATABASE:-dify}
+      PGVECTOR_MIN_CONNECTION: ${PGVECTOR_MIN_CONNECTION:-1}
+      PGVECTOR_MAX_CONNECTION: ${PGVECTOR_MAX_CONNECTION:-5}
       # --- Sandbox (code execution) ---
       CODE_EXECUTION_ENDPOINT: ${CODE_EXECUTION_ENDPOINT:-http://dify-sandbox:8194}
       CODE_EXECUTION_API_KEY: ${DIFY_SANDBOX_API_KEY:-CHANGE_ME}
@@ -463,32 +470,6 @@ services:
     networks:
       - default
 
-  # -------------------------------------------------------------------
-  # dify-weaviate : default vector store for Dify knowledge indexing.
-  #   NCMU keeps KB content in FastGPT (batch 3 TASK-07), but Dify still
-  #   requires a reachable VECTOR_STORE for dataset bootstrap on startup.
-  # -------------------------------------------------------------------
-  dify-weaviate:
-    image: semitechnologies/weaviate:${WEAVIATE_IMAGE_TAG:-1.27.0}
-    container_name: ncmu-dify-weaviate
-    restart: unless-stopped
-    environment:
-      PERSISTENCE_DATA_PATH: /var/lib/weaviate
-      QUERY_DEFAULTS_LIMIT: "25"
-      AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: "false"
-      DEFAULT_VECTORIZER_MODULE: none
-      CLUSTER_HOSTNAME: node1
-      AUTHENTICATION_APIKEY_ENABLED: "true"
-      AUTHENTICATION_APIKEY_ALLOWED_KEYS: ${WEAVIATE_API_KEY:-CHANGE_ME}
-      AUTHENTICATION_APIKEY_USERS: ${WEAVIATE_API_USER:-ncmu@local}
-      AUTHORIZATION_ADMINLIST_ENABLED: "true"
-      AUTHORIZATION_ADMINLIST_USERS: ${WEAVIATE_API_USER:-ncmu@local}
-      DISABLE_TELEMETRY: "true"
-    volumes:
-      - dify-weaviate-data:/var/lib/weaviate
-    networks:
-      - default
-
 networks:
   default:
     name: ncmu-net
@@ -503,4 +484,3 @@ volumes:
   dify-plugin-daemon-storage:
   dify-sandbox-deps:
   dify-sandbox-conf:
-  dify-weaviate-data:
