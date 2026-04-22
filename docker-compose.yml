@@ -742,6 +742,55 @@ services:
           - fastgpt
           - fastgpt-app
 
+  # =====================================================================
+  # ncmu-nginx : NCMU outer gateway (TASK-09)
+  # ---------------------------------------------------------------------
+  # Single HTTP/S entry point into the NCMU stack. Reverse-proxies
+  # Dify-owned paths (/console, /v1, /api, /files, /explore, /e, /mcp,
+  # /triggers) into dify-nginx and reserves /api/v1/ncmu/* for the
+  # Phase 1 ncmu-backend (503 placeholder today). / is a Phase 4
+  # ncmu-web slot, text-stub today.
+  #
+  # Profile selection: $DEPLOY_PROFILE picks dev.conf.template or
+  # prod.conf.template. The 00-ncmu-profile-select.sh script runs
+  # before the nginx:latest entrypoint's envsubst pass.
+  #
+  # Image pinned to $NCMU_NGINX_IMAGE_TAG (default nginx:latest, same
+  # choice as dify-nginx — see versions-locked-2026-04-21.md + TASK-06
+  # rationale for avoiding nginx:alpine).
+  # =====================================================================
+  ncmu-nginx:
+    image: ${NCMU_NGINX_IMAGE_TAG:-nginx:latest}
+    container_name: ncmu-nginx
+    restart: unless-stopped
+    environment:
+      DEPLOY_PROFILE: ${DEPLOY_PROFILE:-dev}
+      NCMU_NGINX_SERVER_NAME: ${NCMU_NGINX_SERVER_NAME:-_}
+      NCMU_NGINX_HTTP_PORT: ${NCMU_NGINX_HTTP_PORT:-80}
+      NCMU_NGINX_HTTPS_PORT: ${NCMU_NGINX_HTTPS_PORT:-443}
+      NCMU_NGINX_CERT_PATH: ${NCMU_NGINX_CERT_PATH:-/etc/ncmu/certs/server.crt}
+      NCMU_NGINX_KEY_PATH: ${NCMU_NGINX_KEY_PATH:-/etc/ncmu/certs/server.key}
+      NCMU_NGINX_CLIENT_MAX_BODY_SIZE: ${NCMU_NGINX_CLIENT_MAX_BODY_SIZE:-100M}
+    volumes:
+      - ./docker/nginx/dev.conf.template:/etc/nginx/templates-source/dev.conf.template:ro
+      - ./docker/nginx/prod.conf.template:/etc/nginx/templates-source/prod.conf.template:ro
+      - ./docker/nginx/proxy_common.conf:/etc/nginx/snippets/proxy_common.conf:ro
+      - ./docker/nginx/docker-entrypoint.sh:/docker-entrypoint.d/00-ncmu-profile-select.sh:ro
+    ports:
+      - "${NCMU_NGINX_HTTP_HOST_PORT:-80}:80"
+      - "${NCMU_NGINX_HTTPS_HOST_PORT:-443}:443"
+    depends_on:
+      dify-nginx:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost/healthz >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - default
+
 networks:
   default:
     name: ncmu-net
