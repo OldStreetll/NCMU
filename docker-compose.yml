@@ -783,11 +783,15 @@ services:
       dify-nginx:
         condition: service_started
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost/healthz >/dev/null || exit 1"]
+      # nginx:latest ships curl at /usr/bin/curl but has no wget; the
+      # /healthz route is defined in docker/nginx/{dev,prod}.conf.template
+      # and returns 200 "ok" after the profile selector script renders
+      # the active template. See TASK-09-FIX for the wget -> curl switch.
+      test: ["CMD-SHELL", "curl -fsS http://localhost/healthz || exit 1"]
       interval: 10s
       timeout: 5s
-      retries: 5
-      start_period: 10s
+      retries: 3
+      start_period: 15s
     networks:
       - default
 
