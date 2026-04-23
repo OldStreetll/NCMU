@@ -1,0 +1,22 @@
+-- =====================================================================
+-- pg-dify init-db (placeholder)
+-- =====================================================================
+-- Dify ships its own Alembic migrations and runs them on api startup
+-- (langgenius/dify-api:v1.13.3 entrypoint). The pg-dify postgres
+-- container only needs to provide the database; schema is owned by
+-- the Dify image, not by NCMU.
+--
+-- The `dify` database is created by the postgres entrypoint via
+-- POSTGRES_DB=${DIFY_DB_NAME}, so this script intentionally runs no
+-- DDL. Kept as a placeholder so /docker-entrypoint-initdb.d/ ordering
+-- (01 / 02 / 03) reflects the three pg instances symmetrically.
+--
+-- TASK-06-REV (errata-02): pg-dify now runs the pgvector/pgvector:pg16
+-- image so Dify's internal vector store lives on this same instance.
+-- See NCMU-Wiki/sources/phase0/versions-locked-2026-04-21-errata-02.md.
+-- =====================================================================
+
+-- Dify internal vector store (replaces the dropped dify-weaviate service).
+-- The pgvector extension ships with the pg-dify image; CREATE EXTENSION
+-- enables it for Dify's \c dify session.
+CREATE EXTENSION IF NOT EXISTS vector;

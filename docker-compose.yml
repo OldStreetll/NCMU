@@ -1,0 +1,813 @@
+# =====================================================================
+# NCMU v3.3.1 — base docker-compose
+# =====================================================================
+# Scope of this file (TASK-05): three postgres instances + one redis.
+# Subsequent tasks append additional services to this same file:
+#   TASK-06 → dify-api / dify-worker / dify-web / dify-sandbox
+#   TASK-07 → fastgpt-api / fastgpt-mongo / tei (embedding worker)
+#   TASK-09 → nginx
+#
+# Image tags are sourced from .env (see PG_IMAGE_TAG, REDIS_IMAGE_TAG).
+# Authoritative version pin: NCMU-Wiki/sources/phase0/versions-locked-2026-04-21.md
+#
+# Volume strategy (see prerequisites-2026-04-21.md §2):
+#   * Base: bind mounts under ./data/ (Linux-host friendly, browsable)
+#   * Override (Windows/WSL2 NTFS): named volumes via
+#     docker-compose.override.yaml (cp from .example).
+# =====================================================================
+
+services:
+
+  # -------------------------------------------------------------------
+  # pg-ncmu : NCMU backend DB (Phase 1+) and v3.3 Dify-integration tables
+  # -------------------------------------------------------------------
+  pg-ncmu:
+    image: postgres:${PG_IMAGE_TAG:-16-alpine}
+    container_name: ncmu-pg-ncmu
+    environment:
+      POSTGRES_USER: ${NCMU_DB_USER:-ncmu_app}
+      POSTGRES_PASSWORD: ${NCMU_APP_PASSWORD:-CHANGE_ME}
+      POSTGRES_DB: ${NCMU_DB_NAME:-ncmu}
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./data/pg-ncmu:/var/lib/postgresql/data
+      - ./docker/init-db/01-pg-ncmu.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${NCMU_DB_USER:-ncmu_app} -d ${NCMU_DB_NAME:-ncmu}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  # -------------------------------------------------------------------
+  # pg-dify : Dify metadata DB (apps / conversations / datasets / etc.)
+  #           + Dify internal vector store via pgvector extension
+  #           (per errata-02, replaces the separate Weaviate container).
+  # -------------------------------------------------------------------
+  pg-dify:
+    image: ${DIFY_PGVECTOR_IMAGE_TAG:-pgvector/pgvector:pg16}
+    container_name: ncmu-pg-dify
+    environment:
+      POSTGRES_USER: ${DIFY_DB_USER:-dify}
+      POSTGRES_PASSWORD: ${DIFY_DB_PASSWORD:-CHANGE_ME}
+      POSTGRES_DB: ${DIFY_DB_NAME:-dify}
+    ports:
+      - "${DIFY_DB_HOST_PORT:-5433}:5432"
+    volumes:
+      - ./data/pg-dify:/var/lib/postgresql/data
+      - ./docker/init-db/02-pg-dify.sql:/docker-entrypoint-initdb.d/02-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DIFY_DB_USER:-dify} -d ${DIFY_DB_NAME:-dify}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  # -------------------------------------------------------------------
+  # pg-fastgpt : FastGPT metadata + pgvector store
+  # -------------------------------------------------------------------
+  # TASK-07 image lock: pgvector/pgvector:0.8.0-pg15 (FastGPT v4.14.12
+  # upstream compose literal — see deploy/docker/global/docker-compose.pg.yml).
+  # NOTE: pg-dify uses pgvector/pgvector:pg16 (errata-02). pg-fastgpt and
+  # pg-dify intentionally split major versions because FastGPT upstream
+  # tests against pg15; revisit unification after Phase 0 (backlog item
+  # logged in TASK-15).
+  pg-fastgpt:
+    image: ${FASTGPT_PGVECTOR_IMAGE_TAG:-pgvector/pgvector:0.8.0-pg15}
+    container_name: ncmu-pg-fastgpt
+    environment:
+      POSTGRES_USER: ${FASTGPT_DB_USER:-fastgpt}
+      POSTGRES_PASSWORD: ${FASTGPT_DB_PASSWORD:-CHANGE_ME}
+      POSTGRES_DB: ${FASTGPT_DB_NAME:-fastgpt}
+    ports:
+      - "${FASTGPT_DB_HOST_PORT:-5434}:5432"
+    volumes:
+      - ./data/pg-fastgpt:/var/lib/postgresql/data
+      - ./docker/init-db/03-pg-fastgpt.sql:/docker-entrypoint-initdb.d/03-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${FASTGPT_DB_USER:-fastgpt} -d ${FASTGPT_DB_NAME:-fastgpt}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  # -------------------------------------------------------------------
+  # redis : single instance, AOF persistence, logical DBs allocated as
+  #         /0 ncmu-backend, /1 Dify, /2 FastGPT (per .env.example).
+  # -------------------------------------------------------------------
+  redis:
+    image: redis:${REDIS_IMAGE_TAG:-7-alpine}
+    container_name: ncmu-redis
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - ./data/redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
+  # =====================================================================
+  # Dify v1.13.3 services (TASK-06)
+  # ---------------------------------------------------------------------
+  # Upstream reference :
+  #   https://github.com/langgenius/dify/blob/1.13.3/docker/docker-compose.yaml
+  # NCMU-specific deviations from upstream:
+  #   1. Drop Dify's built-in db_postgres (profile-gated). Dify api/worker/
+  #      worker_beat/plugin_daemon connect to NCMU's pg-dify instead.
+  #   2. Drop Dify's built-in redis service. All Dify components connect to
+  #      NCMU's redis at DB index 1 (CELERY_BROKER_URL / REDIS_DB=1).
+  #   3. NCMU container names keep the `ncmu-` prefix (TASK-05 convention).
+  #   4. Dify-internal configs (nginx/squid templates) vendored under
+  #      ./docker/dify/{nginx,ssrf_proxy}/ so this compose is self-contained.
+  #   5. Application storage uses named volumes (NTFS-safe per
+  #      prerequisites-2026-04-21.md §2; Dify's init_permissions chown:1001
+  #      would fail on /mnt/d bind mount identical to the postgres initdb
+  #      path, see TASK-03 §2 repro).
+  #   6. Exposed host ports:
+  #        - dify-nginx : ${DIFY_PORT:-8080} → console + /v1 API
+  #        - dify-plugin-daemon debug : 5003 (Dify dev feature, kept local)
+  #      No other Dify internals are host-exposed.
+  # The Dify-specific env defaults live in the DIFY section of .env.example;
+  # Dify's sprawling shared config (~500 env vars) is left at upstream
+  # defaults via `:-` fallbacks baked into the upstream image.
+  # =====================================================================
+
+  # -------------------------------------------------------------------
+  # dify-init-permissions : one-shot chown of the shared storage volume
+  #   Upstream container `init_permissions` (chown -R 1001:1001 …). Must
+  #   run before dify-api/worker/worker_beat so they can write /app/api/storage.
+  # -------------------------------------------------------------------
+  dify-init-permissions:
+    image: busybox:latest
+    container_name: ncmu-dify-init-permissions
+    command:
+      - sh
+      - -c
+      - |
+        FLAG_FILE="/app/api/storage/.init_permissions"
+        if [ -f "$${FLAG_FILE}" ]; then
+          echo "Permissions already initialized. Exiting."
+          exit 0
+        fi
+        echo "Initializing permissions for /app/api/storage"
+        chown -R 1001:1001 /app/api/storage && touch "$${FLAG_FILE}"
+        echo "Permissions initialized. Exiting."
+    volumes:
+      - dify-app-storage:/app/api/storage
+    restart: "no"
+
+  # -------------------------------------------------------------------
+  # dify-init-plugin-db : one-shot creation of the `dify_plugin` database
+  #   plugin_daemon expects a separate DB from the main `dify` DB. Since
+  #   NCMU's init-db/02-pg-dify.sql is immutable under TASK-06 scope, we
+  #   create the plugin DB with an idempotent psql call after pg-dify is
+  #   healthy. Fails closed if pg-dify is unreachable.
+  # -------------------------------------------------------------------
+  dify-init-plugin-db:
+    image: postgres:${PG_IMAGE_TAG:-16-alpine}
+    container_name: ncmu-dify-init-plugin-db
+    depends_on:
+      pg-dify:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: ${DIFY_DB_PASSWORD:-CHANGE_ME}
+    entrypoint:
+      - sh
+      - -c
+      - |
+        set -e
+        DB="${DIFY_DB_PLUGIN_DATABASE:-dify_plugin}"
+        USER="${DIFY_DB_USER:-dify}"
+        existing=$$(psql -h pg-dify -U "$$USER" -d "${DIFY_DB_NAME:-dify}" -tAc "SELECT 1 FROM pg_database WHERE datname='$$DB'")
+        if [ "$$existing" = "1" ]; then
+          echo "[OK] database $$DB already exists"
+        else
+          echo "[CREATE] database $$DB"
+          psql -h pg-dify -U "$$USER" -d postgres -c "CREATE DATABASE $$DB OWNER $$USER"
+        fi
+    restart: "no"
+
+  # -------------------------------------------------------------------
+  # dify-api : REST + console API (MODE=api)
+  # -------------------------------------------------------------------
+  dify-api: &dify-api-common
+    image: langgenius/dify-api:${DIFY_IMAGE_TAG:-1.13.3}
+    container_name: ncmu-dify-api
+    restart: unless-stopped
+    environment: &dify-api-env
+      MODE: api
+      LOG_LEVEL: ${DIFY_LOG_LEVEL:-INFO}
+      SECRET_KEY: ${DIFY_SECRET_KEY:-CHANGE_ME}
+      INIT_PASSWORD: ${DIFY_INIT_PASSWORD:-}
+      DEPLOY_ENV: ${DIFY_DEPLOY_ENV:-PRODUCTION}
+      CONSOLE_API_URL: ${DIFY_CONSOLE_API_URL:-}
+      CONSOLE_WEB_URL: ${DIFY_CONSOLE_WEB_URL:-}
+      SERVICE_API_URL: ${DIFY_SERVICE_API_URL:-}
+      APP_API_URL: ${DIFY_APP_API_URL:-}
+      APP_WEB_URL: ${DIFY_APP_WEB_URL:-}
+      FILES_URL: ${DIFY_FILES_URL:-}
+      MIGRATION_ENABLED: "true"
+      # --- DB : NCMU pg-dify (override upstream db_postgres default) ---
+      DB_USERNAME: ${DIFY_DB_USER:-dify}
+      DB_PASSWORD: ${DIFY_DB_PASSWORD:-CHANGE_ME}
+      DB_HOST: ${DIFY_DB_HOST:-pg-dify}
+      DB_PORT: ${DIFY_DB_PORT:-5432}
+      DB_DATABASE: ${DIFY_DB_NAME:-dify}
+      # --- Redis : NCMU redis, DB index 1 (NCMU backend uses 0) ---
+      REDIS_HOST: ${REDIS_HOST:-redis}
+      REDIS_PORT: ${REDIS_PORT:-6379}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      REDIS_DB: ${DIFY_REDIS_DB:-1}
+      CELERY_BROKER_URL: ${DIFY_CELERY_BROKER_URL:-redis://redis:6379/1}
+      # --- Vector store : pgvector on pg-dify (per errata-02) ---
+      VECTOR_STORE: ${DIFY_VECTOR_STORE:-pgvector}
+      PGVECTOR_HOST: ${PGVECTOR_HOST:-pg-dify}
+      PGVECTOR_PORT: ${PGVECTOR_PORT:-5432}
+      PGVECTOR_USER: ${PGVECTOR_USER:-dify}
+      PGVECTOR_PASSWORD: ${PGVECTOR_PASSWORD:-${DIFY_DB_PASSWORD:-CHANGE_ME}}
+      PGVECTOR_DATABASE: ${PGVECTOR_DATABASE:-dify}
+      PGVECTOR_MIN_CONNECTION: ${PGVECTOR_MIN_CONNECTION:-1}
+      PGVECTOR_MAX_CONNECTION: ${PGVECTOR_MAX_CONNECTION:-5}
+      # --- Sandbox (code execution) ---
+      CODE_EXECUTION_ENDPOINT: ${CODE_EXECUTION_ENDPOINT:-http://dify-sandbox:8194}
+      CODE_EXECUTION_API_KEY: ${DIFY_SANDBOX_API_KEY:-CHANGE_ME}
+      # --- SSRF proxy (workflow nodes fetching external URLs) ---
+      SSRF_PROXY_HTTP_URL: ${SSRF_PROXY_HTTP_URL:-http://dify-ssrf-proxy:3128}
+      SSRF_PROXY_HTTPS_URL: ${SSRF_PROXY_HTTPS_URL:-http://dify-ssrf-proxy:3128}
+      # --- Plugin daemon handshake ---
+      PLUGIN_DAEMON_URL: ${PLUGIN_DAEMON_URL:-http://dify-plugin-daemon:5002}
+      PLUGIN_DAEMON_KEY: ${DIFY_PLUGIN_DAEMON_KEY:-CHANGE_ME}
+      PLUGIN_DIFY_INNER_API_URL: ${PLUGIN_DIFY_INNER_API_URL:-http://dify-api:5001}
+      INNER_API_KEY_FOR_PLUGIN: ${DIFY_PLUGIN_INNER_API_KEY:-CHANGE_ME}
+      PLUGIN_REMOTE_INSTALL_HOST: ${EXPOSE_PLUGIN_DEBUGGING_HOST:-localhost}
+      PLUGIN_REMOTE_INSTALL_PORT: ${EXPOSE_PLUGIN_DEBUGGING_PORT:-5003}
+    depends_on:
+      pg-dify:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      dify-init-permissions:
+        condition: service_completed_successfully
+      dify-init-plugin-db:
+        condition: service_completed_successfully
+    volumes:
+      - dify-app-storage:/app/api/storage
+    networks:
+      default:
+        # Alias `api` matches the upstream-vendored nginx template
+        # (docker/dify/nginx/conf.d/default.conf.template). Keeping the
+        # alias means the template file is a verbatim copy of upstream.
+        aliases:
+          - api
+      dify-ssrf-net: {}
+
+  # -------------------------------------------------------------------
+  # dify-worker : Celery worker (MODE=worker)
+  # -------------------------------------------------------------------
+  dify-worker:
+    <<: *dify-api-common
+    container_name: ncmu-dify-worker
+    environment:
+      <<: *dify-api-env
+      MODE: worker
+    networks:
+      default: {}
+      dify-ssrf-net: {}
+
+  # -------------------------------------------------------------------
+  # dify-worker-beat : Celery beat scheduler (MODE=beat)
+  # -------------------------------------------------------------------
+  dify-worker-beat:
+    <<: *dify-api-common
+    container_name: ncmu-dify-worker-beat
+    environment:
+      <<: *dify-api-env
+      MODE: beat
+    volumes: []        # beat does not need app storage
+    networks:
+      default: {}
+      dify-ssrf-net: {}
+
+  # -------------------------------------------------------------------
+  # dify-web : Next.js frontend (console + app)
+  # -------------------------------------------------------------------
+  dify-web:
+    image: langgenius/dify-web:${DIFY_WEB_IMAGE_TAG:-1.13.3}
+    container_name: ncmu-dify-web
+    restart: unless-stopped
+    environment:
+      CONSOLE_API_URL: ${DIFY_CONSOLE_API_URL:-}
+      APP_API_URL: ${DIFY_APP_API_URL:-}
+      NEXT_TELEMETRY_DISABLED: ${NEXT_TELEMETRY_DISABLED:-1}
+      MARKETPLACE_API_URL: ${MARKETPLACE_API_URL:-https://marketplace.dify.ai}
+      MARKETPLACE_URL: ${MARKETPLACE_URL:-https://marketplace.dify.ai}
+    networks:
+      default:
+        # Alias `web` matches upstream nginx template (see dify-api note).
+        aliases:
+          - web
+
+  # -------------------------------------------------------------------
+  # dify-sandbox : secure code execution runner (DifySandbox 0.2.14)
+  #   Isolated on dify-ssrf-net; its egress only via dify-ssrf-proxy.
+  # -------------------------------------------------------------------
+  dify-sandbox:
+    image: langgenius/dify-sandbox:${DIFY_SANDBOX_IMAGE_TAG:-0.2.14}
+    container_name: ncmu-dify-sandbox
+    restart: unless-stopped
+    environment:
+      API_KEY: ${DIFY_SANDBOX_API_KEY:-CHANGE_ME}
+      GIN_MODE: ${DIFY_SANDBOX_GIN_MODE:-release}
+      WORKER_TIMEOUT: ${DIFY_SANDBOX_WORKER_TIMEOUT:-15}
+      ENABLE_NETWORK: ${DIFY_SANDBOX_ENABLE_NETWORK:-true}
+      HTTP_PROXY: ${DIFY_SANDBOX_HTTP_PROXY:-http://dify-ssrf-proxy:3128}
+      HTTPS_PROXY: ${DIFY_SANDBOX_HTTPS_PROXY:-http://dify-ssrf-proxy:3128}
+      SANDBOX_PORT: ${DIFY_SANDBOX_PORT:-8194}
+      PIP_MIRROR_URL: ${DIFY_PIP_MIRROR_URL:-}
+    volumes:
+      - dify-sandbox-deps:/dependencies
+      - dify-sandbox-conf:/conf
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8194/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    networks:
+      - dify-ssrf-net
+
+  # -------------------------------------------------------------------
+  # dify-plugin-daemon : plugin runtime (NEW in Dify v1.x)
+  #   Connects to pg-dify using a SEPARATE database `dify_plugin` (see
+  #   dify-init-plugin-db above).
+  # -------------------------------------------------------------------
+  dify-plugin-daemon:
+    image: langgenius/dify-plugin-daemon:${DIFY_PLUGIN_DAEMON_IMAGE_TAG:-0.5.3-local}
+    container_name: ncmu-dify-plugin-daemon
+    restart: unless-stopped
+    environment:
+      # DB
+      DB_USERNAME: ${DIFY_DB_USER:-dify}
+      DB_PASSWORD: ${DIFY_DB_PASSWORD:-CHANGE_ME}
+      DB_HOST: ${DIFY_DB_HOST:-pg-dify}
+      DB_PORT: ${DIFY_DB_PORT:-5432}
+      DB_DATABASE: ${DIFY_DB_PLUGIN_DATABASE:-dify_plugin}
+      # Redis
+      REDIS_HOST: ${REDIS_HOST:-redis}
+      REDIS_PORT: ${REDIS_PORT:-6379}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      REDIS_DB: ${DIFY_REDIS_DB:-1}
+      # Daemon handshake
+      SERVER_PORT: ${PLUGIN_DAEMON_PORT:-5002}
+      SERVER_KEY: ${DIFY_PLUGIN_DAEMON_KEY:-CHANGE_ME}
+      DIFY_INNER_API_URL: ${PLUGIN_DIFY_INNER_API_URL:-http://dify-api:5001}
+      DIFY_INNER_API_KEY: ${DIFY_PLUGIN_INNER_API_KEY:-CHANGE_ME}
+      PLUGIN_REMOTE_INSTALLING_HOST: ${PLUGIN_DEBUGGING_HOST:-0.0.0.0}
+      PLUGIN_REMOTE_INSTALLING_PORT: ${PLUGIN_DEBUGGING_PORT:-5003}
+      PLUGIN_WORKING_PATH: ${PLUGIN_WORKING_PATH:-/app/storage/cwd}
+      FORCE_VERIFYING_SIGNATURE: ${DIFY_FORCE_VERIFYING_SIGNATURE:-true}
+      PYTHON_ENV_INIT_TIMEOUT: ${PLUGIN_PYTHON_ENV_INIT_TIMEOUT:-120}
+      PLUGIN_MAX_EXECUTION_TIMEOUT: ${PLUGIN_MAX_EXECUTION_TIMEOUT:-600}
+      PLUGIN_STORAGE_TYPE: ${PLUGIN_STORAGE_TYPE:-local}
+      PLUGIN_STORAGE_LOCAL_ROOT: ${PLUGIN_STORAGE_LOCAL_ROOT:-/app/storage}
+      PLUGIN_INSTALLED_PATH: ${PLUGIN_INSTALLED_PATH:-plugin}
+      PLUGIN_PACKAGE_CACHE_PATH: ${PLUGIN_PACKAGE_CACHE_PATH:-plugin_packages}
+      PLUGIN_MEDIA_CACHE_PATH: ${PLUGIN_MEDIA_CACHE_PATH:-assets}
+      PIP_MIRROR_URL: ${DIFY_PIP_MIRROR_URL:-}
+    ports:
+      - "${EXPOSE_PLUGIN_DEBUGGING_PORT:-5003}:${PLUGIN_DEBUGGING_PORT:-5003}"
+    volumes:
+      - dify-plugin-daemon-storage:/app/storage
+    depends_on:
+      pg-dify:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      dify-init-plugin-db:
+        condition: service_completed_successfully
+    networks:
+      default:
+        # Alias `plugin_daemon` matches upstream nginx template (/e/ route).
+        aliases:
+          - plugin_daemon
+
+  # -------------------------------------------------------------------
+  # dify-ssrf-proxy : squid egress proxy for the code sandbox
+  #   Upstream convention: sandbox and api/worker share this network so
+  #   internal cluster traffic bypasses the proxy, but sandbox's external
+  #   requests must go through it.
+  # -------------------------------------------------------------------
+  dify-ssrf-proxy:
+    image: ubuntu/squid:latest
+    container_name: ncmu-dify-ssrf-proxy
+    restart: unless-stopped
+    environment:
+      HTTP_PORT: ${SSRF_HTTP_PORT:-3128}
+      COREDUMP_DIR: ${SSRF_COREDUMP_DIR:-/var/spool/squid}
+      REVERSE_PROXY_PORT: ${SSRF_REVERSE_PROXY_PORT:-8194}
+      SANDBOX_HOST: ${SSRF_SANDBOX_HOST:-dify-sandbox}
+      SANDBOX_PORT: ${DIFY_SANDBOX_PORT:-8194}
+    volumes:
+      - ./docker/dify/ssrf_proxy/squid.conf.template:/etc/squid/squid.conf.template
+      - ./docker/dify/ssrf_proxy/docker-entrypoint.sh:/docker-entrypoint-mount.sh
+    entrypoint:
+      - sh
+      - -c
+      - "cp /docker-entrypoint-mount.sh /docker-entrypoint.sh && sed -i 's/\\r$$//' /docker-entrypoint.sh && chmod +x /docker-entrypoint.sh && /docker-entrypoint.sh"
+    networks:
+      - default
+      - dify-ssrf-net
+
+  # -------------------------------------------------------------------
+  # dify-nginx : internal reverse proxy in front of dify-api + dify-web
+  #   Exposed on host ${DIFY_PORT:-8080}. TASK-09's outer NCMU nginx
+  #   (Phase 0 batch 4) will reverse-proxy this port onwards.
+  # -------------------------------------------------------------------
+  dify-nginx:
+    image: nginx:${DIFY_NGINX_IMAGE_TAG:-latest}
+    container_name: ncmu-dify-nginx
+    restart: unless-stopped
+    environment:
+      NGINX_SERVER_NAME: ${DIFY_NGINX_SERVER_NAME:-_}
+      NGINX_HTTPS_ENABLED: "false"
+      NGINX_PORT: ${DIFY_NGINX_INTERNAL_PORT:-80}
+      NGINX_SSL_PORT: "443"
+      NGINX_SSL_CERT_FILENAME: dify.crt
+      NGINX_SSL_CERT_KEY_FILENAME: dify.key
+      NGINX_SSL_PROTOCOLS: "TLSv1.2 TLSv1.3"
+      NGINX_WORKER_PROCESSES: auto
+      NGINX_CLIENT_MAX_BODY_SIZE: ${NGINX_CLIENT_MAX_BODY_SIZE:-100M}
+      NGINX_KEEPALIVE_TIMEOUT: "65"
+      NGINX_PROXY_READ_TIMEOUT: 3600s
+      NGINX_PROXY_SEND_TIMEOUT: 3600s
+      NGINX_ENABLE_CERTBOT_CHALLENGE: "false"
+      CERTBOT_DOMAIN: ""
+    volumes:
+      # Mount individual template files so the envsubst-generated
+      # {nginx.conf, proxy.conf, conf.d/default.conf} stay inside the
+      # container overlay and don't leak back to the host source tree.
+      - ./docker/dify/nginx/nginx.conf.template:/etc/nginx/nginx.conf.template:ro
+      - ./docker/dify/nginx/proxy.conf.template:/etc/nginx/proxy.conf.template:ro
+      - ./docker/dify/nginx/https.conf.template:/etc/nginx/https.conf.template:ro
+      - ./docker/dify/nginx/conf.d/default.conf.template:/etc/nginx/conf.d/default.conf.template:ro
+      - ./docker/dify/nginx/docker-entrypoint.sh:/docker-entrypoint-mount.sh:ro
+    entrypoint:
+      - sh
+      - -c
+      - "cp /docker-entrypoint-mount.sh /docker-entrypoint.sh && sed -i 's/\\r$$//' /docker-entrypoint.sh && chmod +x /docker-entrypoint.sh && /docker-entrypoint.sh"
+    depends_on:
+      - dify-api
+      - dify-web
+    ports:
+      - "${DIFY_PORT:-8080}:${DIFY_NGINX_INTERNAL_PORT:-80}"
+    networks:
+      - default
+
+  # =====================================================================
+  # FastGPT v4.14.12 services (TASK-07)
+  # ---------------------------------------------------------------------
+  # Upstream reference :
+  #   https://github.com/labring/FastGPT/blob/v4.14.12/deploy/docker/global/docker-compose.pg.yml
+  # NCMU-specific deviations from upstream (documented for Pane 5 review):
+  #   1. pg-fastgpt is reused (NOT a separate fastgpt-vector container).
+  #      Image is pgvector/pgvector:0.8.0-pg15, init script in
+  #      docker/init-db/03-pg-fastgpt.sql installs the vector extension.
+  #   2. NCMU redis is reused at logical DB 2 (NOT a separate fastgpt-redis
+  #      container). NCMU redis runs without requirepass; FastGPT's REDIS_URL
+  #      reflects that.
+  #   3. fastgpt-minio is NOT deployed. Storage points to the host's MinIO
+  #      via host.docker.internal:9000 (per prerequisites-2026-04-21.md §4).
+  #   4. fastgpt-plugin IS deployed. Smoke testing showed fastgpt-app
+  #      hard-fails its `[plugin_error] Failed to parse URL from
+  #      /api/models/get-providers` initialization step when the plugin
+  #      server is absent (cannot construct a relative URL with no base).
+  #      We therefore vendor fastgpt-plugin v0.5.6 and reuse NCMU's
+  #      mongo/redis; STORAGE_* points at the host MinIO.
+  #   4b. fastgpt-code-sandbox / fastgpt-mcp-server / fastgpt-aiproxy(-pg)
+  #      / opensandbox-server / fastgpt-volume-manager / fastgpt-minio
+  #      are NOT deployed. The features they enable (workflow code nodes,
+  #      MCP, AI proxy, agent sandbox) are explicitly out of Phase 0
+  #      scope (TASK-07 → 退出条件 #5 only requires RAG end-to-end).
+  #      Reintroduce in a Phase 1+ task if those features are activated.
+  #   5. fastgpt-app's depends_on is patched to drop the skipped services;
+  #      its env vars CODE_SANDBOX_URL / AIPROXY_API_ENDPOINT /
+  #      AGENT_SANDBOX_* are blanked so FastGPT does not call missing
+  #      endpoints during the RAG path. PLUGIN_BASE_URL points at the
+  #      vendored fastgpt-plugin container.
+  #   6. fastgpt-app image: ghcr.io/labring/fastgpt:v4.14.10.2 — exactly
+  #      what the v4.14.12 git tag pins in upstream compose. errata-04
+  #      proposed (Pane 5 review) to reconcile versions-locked.
+  # =====================================================================
+
+  # -------------------------------------------------------------------
+  # fastgpt-mongo : metadata store + change-stream replSet (rs0)
+  #   Vendored verbatim from upstream compose: bash entrypoint generates
+  #   /data/mongodb.key (openssl rand 128) on first boot, then runs
+  #   mongod --keyFile --replSet rs0 and rs.initiate() on a single member.
+  # -------------------------------------------------------------------
+  fastgpt-mongo:
+    image: mongo:${MONGO_IMAGE_TAG:-5.0.32}
+    container_name: ncmu-fastgpt-mongo
+    restart: unless-stopped
+    command: mongod --keyFile /data/mongodb.key --replSet rs0
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${FASTGPT_MONGO_USER:-fastgpt}
+      MONGO_INITDB_ROOT_PASSWORD: ${FASTGPT_MONGO_PASSWORD:-CHANGE_ME}
+    volumes:
+      - fastgpt-mongo-data:/data/db
+    entrypoint:
+      - bash
+      - -c
+      - |
+        if [ ! -f /data/mongodb.key ]; then
+          openssl rand -base64 128 > /data/mongodb.key
+          chmod 400 /data/mongodb.key
+          chown 999:999 /data/mongodb.key
+        fi
+        echo 'const isInited = rs.status().ok === 1
+        if(!isInited){
+          rs.initiate({
+              _id: "rs0",
+              members: [
+                  { _id: 0, host: "fastgpt-mongo:27017" }
+              ]
+          })
+        }' > /data/initReplicaSet.js
+        exec docker-entrypoint.sh "$$@" &
+        until mongo -u "${FASTGPT_MONGO_USER:-fastgpt}" -p "${FASTGPT_MONGO_PASSWORD:-CHANGE_ME}" --authenticationDatabase admin --eval "print('waited for connection')"; do
+          echo "Waiting for MongoDB to start..."
+          sleep 2
+        done
+        mongo -u "${FASTGPT_MONGO_USER:-fastgpt}" -p "${FASTGPT_MONGO_PASSWORD:-CHANGE_ME}" --authenticationDatabase admin /data/initReplicaSet.js
+        wait $$!
+    healthcheck:
+      test:
+        - CMD
+        - mongo
+        - -u
+        - ${FASTGPT_MONGO_USER:-fastgpt}
+        - -p
+        - ${FASTGPT_MONGO_PASSWORD:-CHANGE_ME}
+        - --authenticationDatabase
+        - admin
+        - --eval
+        - db.adminCommand('ping')
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      default:
+        aliases:
+          - fastgpt-mongo
+
+  # -------------------------------------------------------------------
+  # embedding-tei : Hugging Face Text Embeddings Inference (CPU build)
+  #   Loads BAAI/bge-large-zh-v1.5 (~1.3 GiB) on first boot and caches
+  #   weights in the tei-models named volume. Subsequent restarts skip
+  #   the download.
+  #   FastGPT calls TEI via FASTGPT_EMBEDDING_BASE_URL (default http://tei:80).
+  # -------------------------------------------------------------------
+  embedding-tei:
+    image: ghcr.io/huggingface/text-embeddings-inference:${TEI_IMAGE_TAG:-cpu-latest}
+    container_name: ncmu-embedding-tei
+    restart: unless-stopped
+    command:
+      - --model-id
+      - ${TEI_MODEL_ID:-BAAI/bge-large-zh-v1.5}
+      - --port
+      - "80"
+    volumes:
+      - tei-models:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      # First boot pulls BAAI/bge-large-zh-v1.5 weights from HuggingFace
+      # (~1.3 GiB pytorch_model.bin since the repo lacks ONNX/safetensors).
+      # Allow up to 10 min on cold cache; subsequent restarts are seconds.
+      start_period: 600s
+    networks:
+      default:
+        aliases:
+          - tei
+
+  # -------------------------------------------------------------------
+  # fastgpt-plugin : FastGPT model registry / plugin runtime
+  #   Required by fastgpt-app's init-time call to /api/models/get-providers
+  #   (smoke test showed init hard-fails without this server). Reuses
+  #   NCMU mongo/redis; STORAGE_* points at the host MinIO. fastgpt-minio
+  #   depends_on dropped (Phase 0 dev environment uses external MinIO).
+  # -------------------------------------------------------------------
+  fastgpt-plugin:
+    image: ghcr.io/labring/fastgpt-plugin:${FASTGPT_PLUGIN_IMAGE_TAG:-v0.5.6}
+    container_name: ncmu-fastgpt-plugin
+    restart: unless-stopped
+    depends_on:
+      fastgpt-mongo:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      AUTH_TOKEN: ${FASTGPT_PLUGIN_TOKEN:-CHANGE_ME}
+      MONGODB_URI: mongodb://${FASTGPT_MONGO_USER:-fastgpt}:${FASTGPT_MONGO_PASSWORD:-CHANGE_ME}@fastgpt-mongo:27017/fastgpt?authSource=admin
+      DB_MAX_LINK: ${FASTGPT_DB_MAX_LINK:-100}
+      REDIS_URL: redis://${REDIS_HOST:-redis}:${REDIS_PORT:-6379}/${FASTGPT_REDIS_DB:-2}
+      STORAGE_VENDOR: ${FASTGPT_STORAGE_VENDOR:-minio}
+      STORAGE_REGION: ${FASTGPT_STORAGE_REGION:-us-east-1}
+      STORAGE_ACCESS_KEY_ID: ${FASTGPT_STORAGE_ACCESS_KEY_ID:-CHANGE_ME}
+      STORAGE_SECRET_ACCESS_KEY: ${FASTGPT_STORAGE_SECRET_ACCESS_KEY:-CHANGE_ME}
+      STORAGE_PUBLIC_BUCKET: ${FASTGPT_STORAGE_PUBLIC_BUCKET:-fastgpt-public}
+      STORAGE_PRIVATE_BUCKET: ${FASTGPT_STORAGE_PRIVATE_BUCKET:-fastgpt-private}
+      STORAGE_S3_ENDPOINT: ${FASTGPT_STORAGE_S3_ENDPOINT:-http://host.docker.internal:9000}
+      STORAGE_EXTERNAL_ENDPOINT: ${STORAGE_EXTERNAL_ENDPOINT:-http://host.docker.internal:9000}
+      STORAGE_S3_FORCE_PATH_STYLE: "true"
+      STORAGE_S3_MAX_RETRIES: "3"
+      SERVICE_REQUEST_MAX_CONTENT_LENGTH: "10"
+      MAX_API_SIZE: "10"
+      LOG_OTEL_SERVICE_NAME: fastgpt-plugin
+      LOG_ENABLE_OTEL: "false"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    networks:
+      default:
+        aliases:
+          - fastgpt-plugin
+
+  # -------------------------------------------------------------------
+  # fastgpt-app : main FastGPT API + admin console
+  #   image tracks upstream literal pin (v4.14.10.2 inside v4.14.12
+  #   compose). depends_on stripped of code-sandbox / minio (deviation
+  #   #4b-#5 above); fastgpt-plugin IS required.
+  # -------------------------------------------------------------------
+  fastgpt-app:
+    image: ghcr.io/labring/fastgpt:${FASTGPT_IMAGE_TAG:-v4.14.10.2}
+    container_name: ncmu-fastgpt-app
+    restart: unless-stopped
+    depends_on:
+      pg-fastgpt:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      fastgpt-mongo:
+        condition: service_healthy
+      embedding-tei:
+        condition: service_healthy
+      fastgpt-plugin:
+        condition: service_healthy
+    ports:
+      - "${FASTGPT_PORT:-3000}:3000"
+    environment:
+      HOSTNAME: 0.0.0.0
+      # --- DB : NCMU pg-fastgpt with pgvector ---
+      PG_URL: postgresql://${FASTGPT_DB_USER:-fastgpt}:${FASTGPT_DB_PASSWORD:-CHANGE_ME}@${FASTGPT_DB_HOST:-pg-fastgpt}:${FASTGPT_DB_PORT:-5432}/${FASTGPT_DB_NAME:-fastgpt}
+      # --- Mongo (single replSet rs0) ---
+      MONGODB_URI: mongodb://${FASTGPT_MONGO_USER:-fastgpt}:${FASTGPT_MONGO_PASSWORD:-CHANGE_ME}@fastgpt-mongo:27017/fastgpt?authSource=admin
+      DB_MAX_LINK: ${FASTGPT_DB_MAX_LINK:-100}
+      # --- Redis : NCMU redis at DB 2 (no requirepass) ---
+      REDIS_URL: redis://${REDIS_HOST:-redis}:${REDIS_PORT:-6379}/${FASTGPT_REDIS_DB:-2}
+      # --- Object storage : host MinIO via host.docker.internal ---
+      STORAGE_VENDOR: ${FASTGPT_STORAGE_VENDOR:-minio}
+      STORAGE_REGION: ${FASTGPT_STORAGE_REGION:-us-east-1}
+      STORAGE_ACCESS_KEY_ID: ${FASTGPT_STORAGE_ACCESS_KEY_ID:-CHANGE_ME}
+      STORAGE_SECRET_ACCESS_KEY: ${FASTGPT_STORAGE_SECRET_ACCESS_KEY:-CHANGE_ME}
+      STORAGE_PUBLIC_BUCKET: ${FASTGPT_STORAGE_PUBLIC_BUCKET:-fastgpt-public}
+      STORAGE_PRIVATE_BUCKET: ${FASTGPT_STORAGE_PRIVATE_BUCKET:-fastgpt-private}
+      STORAGE_EXTERNAL_ENDPOINT: ${STORAGE_EXTERNAL_ENDPOINT:-http://host.docker.internal:9000}
+      STORAGE_S3_ENDPOINT: ${FASTGPT_STORAGE_S3_ENDPOINT:-http://host.docker.internal:9000}
+      STORAGE_S3_FORCE_PATH_STYLE: "true"
+      STORAGE_S3_MAX_RETRIES: "3"
+      # --- FastGPT root account + system keys ---
+      ROOT_KEY: ${FASTGPT_ROOT_KEY:-CHANGE_ME}
+      DEFAULT_ROOT_PSW: ${FASTGPT_DEFAULT_ROOT_PSW:-CHANGE_ME}
+      TOKEN_KEY: ${FASTGPT_TOKEN_KEY:-CHANGE_ME}
+      FILE_TOKEN_KEY: ${FASTGPT_FILE_TOKEN_KEY:-CHANGE_ME}
+      AES256_SECRET_KEY: ${FASTGPT_AES256_SECRET_KEY:-CHANGE_ME}
+      # --- Embedding worker : in-cluster TEI ---
+      # FastGPT does NOT have a single env var for the embedding endpoint;
+      # the embedding model + base_url are configured via /app/data/config.json
+      # at runtime (see docker/fastgpt/config.json comment) AND via the
+      # admin console "Model Provider" page after first boot. The defaults
+      # below are picked up by the FastGPT v4.14.x model registry on first
+      # run.
+      DEFAULT_EMBEDDING_MODEL: ${FASTGPT_EMBEDDING_MODEL:-bge-large-zh-v1.5}
+      DEFAULT_EMBEDDING_BASE_URL: ${FASTGPT_EMBEDDING_BASE_URL:-http://tei:80}
+      # --- LLM : external MiniMax (per prerequisites §6) ---
+      DEFAULT_CHAT_MODEL: ${FASTGPT_LLM_MODEL:-MiniMax-M2.7}
+      DEFAULT_CHAT_BASE_URL: ${FASTGPT_LLM_BASE_URL:-http://111.172.214.40:32086/v1}
+      DEFAULT_CHAT_API_KEY: ${FASTGPT_LLM_API_KEY:-CHANGE_ME}
+      # --- Plugin server (model registry + plugin marketplace) ---
+      PLUGIN_BASE_URL: ${FASTGPT_PLUGIN_BASE_URL:-http://fastgpt-plugin:3000}
+      PLUGIN_TOKEN: ${FASTGPT_PLUGIN_TOKEN:-CHANGE_ME}
+      # --- Telemetry / runtime tuning ---
+      FE_DOMAIN: ${FASTGPT_FE_DOMAIN:-http://localhost:3000}
+      SYNC_INDEX: "1"
+      LOG_OTEL_SERVICE_NAME: fastgpt-client
+      LOG_ENABLE_OTEL: "false"
+      USE_IP_LIMIT: "false"
+      WORKFLOW_MAX_RUN_TIMES: "1000"
+      WORKFLOW_MAX_LOOP_TIMES: "100"
+      SERVICE_REQUEST_MAX_CONTENT_LENGTH: "10"
+      CHECK_INTERNAL_IP: "false"
+      UPLOAD_FILE_MAX_SIZE: "1000"
+      UPLOAD_FILE_MAX_AMOUNT: "1000"
+      LLM_REQUEST_TRACKING_RETENTION_HOURS: "6"
+      MULTIPLE_DATA_TO_BASE64: "true"
+      MAX_HTML_TRANSFORM_CHARS: "1000000"
+      ALLOWED_ORIGINS: ${FASTGPT_ALLOWED_ORIGINS:-}
+      # --- Disabled features (Phase 0 scope) ---
+      # PLUGIN_BASE_URL / CODE_SANDBOX_URL / AIPROXY_API_ENDPOINT /
+      # AGENT_SANDBOX_OPENSANDBOX_BASEURL / AGENT_SANDBOX_VOLUME_MANAGER_URL
+      # are intentionally left unset so FastGPT does not attempt to call
+      # services that are not deployed in Phase 0 (deviation #4 above).
+    volumes:
+      - ./docker/fastgpt/config.json:/app/data/config.json:ro
+    networks:
+      default:
+        aliases:
+          - fastgpt
+          - fastgpt-app
+
+  # =====================================================================
+  # ncmu-nginx : NCMU outer gateway (TASK-09)
+  # ---------------------------------------------------------------------
+  # Single HTTP/S entry point into the NCMU stack. Reverse-proxies
+  # Dify-owned paths (/console, /v1, /api, /files, /explore, /e, /mcp,
+  # /triggers) into dify-nginx and reserves /api/v1/ncmu/* for the
+  # Phase 1 ncmu-backend (503 placeholder today). / is a Phase 4
+  # ncmu-web slot, text-stub today.
+  #
+  # Profile selection: $DEPLOY_PROFILE picks dev.conf.template or
+  # prod.conf.template. The 00-ncmu-profile-select.sh script runs
+  # before the nginx:latest entrypoint's envsubst pass.
+  #
+  # Image pinned to $NCMU_NGINX_IMAGE_TAG (default nginx:latest, same
+  # choice as dify-nginx — see versions-locked-2026-04-21.md + TASK-06
+  # rationale for avoiding nginx:alpine).
+  # =====================================================================
+  ncmu-nginx:
+    image: ${NCMU_NGINX_IMAGE_TAG:-nginx:latest}
+    container_name: ncmu-nginx
+    restart: unless-stopped
+    environment:
+      DEPLOY_PROFILE: ${DEPLOY_PROFILE:-dev}
+      NCMU_NGINX_SERVER_NAME: ${NCMU_NGINX_SERVER_NAME:-_}
+      NCMU_NGINX_HTTP_PORT: ${NCMU_NGINX_HTTP_PORT:-80}
+      NCMU_NGINX_HTTPS_PORT: ${NCMU_NGINX_HTTPS_PORT:-443}
+      NCMU_NGINX_CERT_PATH: ${NCMU_NGINX_CERT_PATH:-/etc/ncmu/certs/server.crt}
+      NCMU_NGINX_KEY_PATH: ${NCMU_NGINX_KEY_PATH:-/etc/ncmu/certs/server.key}
+      NCMU_NGINX_CLIENT_MAX_BODY_SIZE: ${NCMU_NGINX_CLIENT_MAX_BODY_SIZE:-100M}
+    volumes:
+      - ./docker/nginx/dev.conf.template:/etc/nginx/templates-source/dev.conf.template:ro
+      - ./docker/nginx/prod.conf.template:/etc/nginx/templates-source/prod.conf.template:ro
+      - ./docker/nginx/proxy_common.conf:/etc/nginx/snippets/proxy_common.conf:ro
+      - ./docker/nginx/docker-entrypoint.sh:/docker-entrypoint.d/00-ncmu-profile-select.sh:ro
+    ports:
+      - "${NCMU_NGINX_HTTP_HOST_PORT:-80}:80"
+      - "${NCMU_NGINX_HTTPS_HOST_PORT:-443}:443"
+    depends_on:
+      dify-nginx:
+        condition: service_started
+    healthcheck:
+      # nginx:latest ships curl at /usr/bin/curl but has no wget; the
+      # /healthz route is defined in docker/nginx/{dev,prod}.conf.template
+      # and returns 200 "ok" after the profile selector script renders
+      # the active template. See TASK-09-FIX for the wget -> curl switch.
+      test: ["CMD-SHELL", "curl -fsS http://localhost/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    networks:
+      - default
+
+networks:
+  default:
+    name: ncmu-net
+    driver: bridge
+  dify-ssrf-net:
+    name: ncmu-dify-ssrf-net
+    driver: bridge
+    internal: true
+
+volumes:
+  dify-app-storage:
+  dify-plugin-daemon-storage:
+  dify-sandbox-deps:
+  dify-sandbox-conf:
+  fastgpt-mongo-data:
+  tei-models:

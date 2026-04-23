@@ -1,0 +1,55 @@
+# =====================================================================
+# ncmu-nginx : dev profile (TASK-09)
+# ---------------------------------------------------------------------
+# Security headers per spec §13.3 dev policy:
+#   - CSP permits unsafe-inline / unsafe-eval so Dify console's
+#     generated Next.js bundle works without extra hashing work.
+#   - HSTS NOT emitted (dev runs over plain HTTP).
+# Reverse proxy: /console, /v1, /api, /files, /explore, /e/ route into
+# dify-nginx (which in turn forwards to dify-api / dify-web /
+# dify-plugin-daemon). /api/v1/ncmu/* is a Phase 1 ncmu-backend slot,
+# placeholder 503 today. / is a Phase 4 ncmu-web landing, static stub.
+# =====================================================================
+
+server {
+    listen ${NCMU_NGINX_HTTP_PORT} default_server;
+    server_name ${NCMU_NGINX_SERVER_NAME};
+
+    # ----- security headers (dev: CSP allows unsafe-* for Dify SPA) --
+    add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; connect-src 'self' http: https: ws: wss:; font-src 'self' data:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+
+    client_max_body_size ${NCMU_NGINX_CLIENT_MAX_BODY_SIZE};
+
+    # ----- healthcheck (used by compose healthcheck) ------------------
+    location = /healthz {
+        default_type text/plain;
+        return 200 "ok\n";
+    }
+
+    # ----- Phase 1 ncmu-backend slot (503 placeholder) ----------------
+    # `^~` keeps this ahead of /api/ below so /api/v1/ncmu/* never leaks
+    # into the Dify console upstream.
+    location ^~ /api/v1/ncmu/ {
+        default_type text/plain;
+        return 503 "Phase 0: ncmu-backend not deployed\n";
+    }
+
+    # ----- Dify console + app paths reverse-proxied to dify-nginx -----
+    location /console/ { proxy_pass http://dify-nginx:80; include /etc/nginx/snippets/proxy_common.conf; }
+    location /v1/      { proxy_pass http://dify-nginx:80; include /etc/nginx/snippets/proxy_common.conf; }
+    location /api/     { proxy_pass http://dify-nginx:80; include /etc/nginx/snippets/proxy_common.conf; }
+    location /files/   { proxy_pass http://dify-nginx:80; include /etc/nginx/snippets/proxy_common.conf; }
+    location /explore/ { proxy_pass http://dify-nginx:80; include /etc/nginx/snippets/proxy_common.conf; }
+    location /e/       { proxy_pass http://dify-nginx:80; include /etc/nginx/snippets/proxy_common.conf; }
+    location /mcp      { proxy_pass http://dify-nginx:80; include /etc/nginx/snippets/proxy_common.conf; }
+    location /triggers { proxy_pass http://dify-nginx:80; include /etc/nginx/snippets/proxy_common.conf; }
+
+    # ----- root: Phase 4 ncmu-web placeholder ------------------------
+    location / {
+        default_type text/plain;
+        return 200 "NCMU Phase 0 gateway (dev) — ncmu-web will serve this path from Phase 4.\n";
+    }
+}

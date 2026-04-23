@@ -1,0 +1,31 @@
+// FastGPT system config (vendored from upstream v4.14.12).
+// Source: https://github.com/labring/FastGPT/blob/v4.14.12/projects/app/data/config.json
+// Mounted into fastgpt-app at /app/data/config.json (per upstream compose).
+//
+// Edits beyond upstream:
+//   - mcpServerProxyEndpoint: kept upstream default (localhost:3003);
+//     fastgpt-mcp-server is intentionally NOT deployed in Phase 0.
+//     If a future task adds the MCP server, update this URL.
+{
+  "feConfigs": {
+    "lafEnv": "https://laf.dev",
+    "mcpServerProxyEndpoint": "http://localhost:3003"
+  },
+  "systemEnv": {
+    "datasetParseMaxProcess": 10,
+    "vectorMaxProcess": 10,
+    "qaMaxProcess": 10,
+    "vlmMaxProcess": 10,
+    "tokenWorkers": 30,
+    "hnswEfSearch": 100,
+    "hnswMaxScanTuples": 100000,
+    "customPdfParse": {
+      "url": "",
+      "key": "",
+      "doc2xKey": "",
+      "textinAppId": "",
+      "textinSecretCode": "",
+      "price": 0
+    }
+  }
+}
