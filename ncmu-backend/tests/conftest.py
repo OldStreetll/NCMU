@@ -216,3 +216,95 @@ def respx_mock():
     intercept all httpx requests during the test.
     """
     return _respx_lib.mock(assert_all_called=False)
+
+
+# =====================================================================
+# TASK-27 — chat-specific fixtures
+# ---------------------------------------------------------------------
+# The chat orchestrator streams from a httpx.AsyncClient injected via
+# `Depends(get_dify_client)`. Real respx struggles with multi-chunk SSE
+# in stream-mode, so these tests substitute a tiny in-process fake that
+# exposes just `client.stream("POST", url, ...)` returning a context
+# manager whose `aiter_bytes()` yields canned bytes (typically taken
+# from the real Dify samples archived under
+# NCMU-Wiki/sources/phase1/dify-chat-sample-2026-04-25/).
+# =====================================================================
+
+
+class _FakeDifyResponse:
+    def __init__(self, sse_bytes: bytes, status_code: int = 200,
+                 chunk_size: int = 4096, chunk_delay_s: float = 0.0):
+        self.status_code = status_code
+        self._bytes = sse_bytes
+        self._chunk = chunk_size
+        self._delay = chunk_delay_s
+
+    async def aiter_bytes(self):
+        if not self._bytes:
+            return
+        for i in range(0, len(self._bytes), self._chunk):
+            if self._delay:
+                await asyncio.sleep(self._delay)
+            yield self._bytes[i:i + self._chunk]
+
+
+class _FakeStreamCM:
+    def __init__(self, holder: dict):
+        self._holder = holder
+
+    async def __aenter__(self):
+        if self._holder.get("raise"):
+            raise self._holder["raise"]
+        return _FakeDifyResponse(
+            self._holder["sse_bytes"],
+            status_code=self._holder.get("status", 200),
+            chunk_size=self._holder.get("chunk_size", 4096),
+            chunk_delay_s=self._holder.get("chunk_delay_s", 0.0),
+        )
+
+    async def __aexit__(self, *exc_info):
+        return False
+
+
+class _FakeDifyClient:
+    """Stand-in for the lifespan-owned ``httpx.AsyncClient`` exposed via
+    :func:`ncmu_backend.main.get_dify_client`. Tests mutate
+    ``self.holder`` to set what the next ``stream(...)`` call should
+    surface; ``calls`` records every invocation for assertions.
+    """
+
+    def __init__(self):
+        self.holder: dict = {"sse_bytes": b"", "status": 200, "raise": None,
+                             "chunk_size": 4096, "chunk_delay_s": 0.0}
+        self.calls: list[tuple[str, str, dict]] = []
+
+    def set_sse(self, sse_bytes: bytes, *, status: int = 200,
+                chunk_size: int = 4096, chunk_delay_s: float = 0.0) -> None:
+        self.holder["sse_bytes"] = sse_bytes
+        self.holder["status"] = status
+        self.holder["raise"] = None
+        self.holder["chunk_size"] = chunk_size
+        self.holder["chunk_delay_s"] = chunk_delay_s
+
+    def set_raise(self, exc: BaseException) -> None:
+        self.holder["raise"] = exc
+
+    def stream(self, method: str, url: str, **kwargs):
+        self.calls.append((method, url, kwargs))
+        return _FakeStreamCM(self.holder)
+
+
+@pytest_asyncio.fixture
+async def fake_dify(app_client):
+    """Override ``get_dify_client`` so the chat orchestrator uses an
+    in-process fake. Yields the :class:`_FakeDifyClient` so the test can
+    set the canned SSE payload and inspect call records.
+
+    Depends on ``app_client`` so its dependency_overrides clear cleanly
+    after the test (app_client's teardown calls ``app.dependency_overrides.clear()``).
+    """
+    from ncmu_backend.main import app, get_dify_client
+
+    fake = _FakeDifyClient()
+    app.dependency_overrides[get_dify_client] = lambda: fake
+    yield fake
