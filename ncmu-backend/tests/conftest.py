@@ -74,3 +74,145 @@ def db_session(test_db_url: str):
             yield session
     finally:
         engine.dispose()
+
+
+# =====================================================================
+# TASK-25 — async fixtures (A-1 修订: appended to TASK-22's sync block)
+# ---------------------------------------------------------------------
+# Sync `db_session` above is for schema tests (alembic / CHECK
+# constraints / partial indexes). Business-logic tests (test_auth,
+# test_apps, test_sessions, test_admin) must run on the same async
+# stack as the production code: AsyncSession + async FastAPI routes
+# + httpx.AsyncClient against an ASGI transport.
+#
+# pytest-asyncio is in `asyncio_mode = "auto"` (pyproject.toml), so
+# `async def` test functions don't need an explicit @pytest.mark.asyncio.
+# =====================================================================
+import asyncio
+import uuid
+
+import httpx
+import pytest_asyncio
+import respx as _respx_lib
+from httpx import ASGITransport
+from sqlalchemy.ext.asyncio import (
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
+
+
+def _to_async_url(sync_url: str) -> str:
+    """psycopg sync URL -> asyncpg URL. Mirrors db.session._build_async_url
+    but kept tiny so the conftest stays standalone — the production code
+    is exercised by direct invocation, not by sharing fixtures back."""
+    if sync_url.startswith("postgresql+psycopg://"):
+        return sync_url.replace("postgresql+psycopg://", "postgresql+asyncpg://", 1)
+    if sync_url.startswith("postgresql://"):
+        return sync_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+    return sync_url
+
+
+@pytest_asyncio.fixture
+async def async_db(test_db_url: str):
+    """Yield an AsyncSession bound to a freshly-migrated ephemeral DB.
+
+    Each test that takes this fixture gets:
+      - a brand-new postgres database (pytest-postgresql)
+      - schema applied via `alembic upgrade head` (sync subprocess)
+      - 5 dev seed users inserted via dev_users.sql (so test_auth can
+        immediately exercise the dev-login flow without bespoke seeding)
+    """
+    _run_alembic(test_db_url, "upgrade", "head")
+    # Apply dev seeds — same path the container's entrypoint.sh uses.
+    seed_path = _REPO_ROOT / "alembic" / "seeds" / "dev_users.sql"
+    if seed_path.exists():
+        # Reuse psycopg (sync) for the one-shot seed — no need to spin
+        # up an async engine just for an INSERT.
+        import psycopg
+        with psycopg.connect(test_db_url.replace("+psycopg", ""), autocommit=True) as c:
+            c.execute(seed_path.read_text())
+
+    engine = create_async_engine(_to_async_url(test_db_url))
+    factory = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+    async with factory() as session:
+        yield session
+    await engine.dispose()
+
+
+@pytest_asyncio.fixture
+async def app_client(async_db: AsyncSession, monkeypatch):
+    """Yield an httpx.AsyncClient hitting the FastAPI app via ASGI transport.
+
+    Every backend test that exercises HTTP semantics (status codes,
+    JSON shape, header checks) takes this fixture. The fixture:
+      - sets dev-friendly env vars (NCMU_DB_URL → the ephemeral DB,
+        NCMU_ENABLE_DEV_LOGIN=true, deterministic NCMU_JWT_SECRET);
+      - imports `ncmu_backend.main:app` AFTER env is patched (so
+        Settings() picks up the test values);
+      - overrides `get_db` so endpoints share the test's `async_db`
+        session (matters for transaction visibility in the same test).
+    """
+    test_db_url = str(async_db.bind.url).replace("+asyncpg", "")  # readable for env
+    monkeypatch.setenv(
+        "NCMU_DB_URL",
+        test_db_url if test_db_url.startswith("postgresql://") else "postgresql://" + test_db_url.split("://", 1)[1],
+    )
+    monkeypatch.setenv("NCMU_JWT_SECRET", "test-secret-deterministic-32-bytes-long-xx")
+    monkeypatch.setenv("NCMU_ENABLE_DEV_LOGIN", "true")
+    monkeypatch.setenv("DEPLOY_PROFILE", "dev")
+
+    # Import-after-monkeypatch so Settings() is built from the test env.
+    from ncmu_backend.config import reset_settings_cache
+    reset_settings_cache()
+    from ncmu_backend.main import app
+    from ncmu_backend.db.session import get_db
+
+    async def _override_get_db():
+        yield async_db
+    app.dependency_overrides[get_db] = _override_get_db
+
+    transport = ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://testserver"
+    ) as client:
+        yield client
+
+    app.dependency_overrides.clear()
+    reset_settings_cache()
+
+
+@pytest.fixture
+def jwt_secret() -> str:
+    """Deterministic secret used both inside the app (via NCMU_JWT_SECRET
+    env in app_client) and in tests that craft custom tokens."""
+    return "test-secret-deterministic-32-bytes-long-xx"
+
+
+@pytest.fixture
+def jwt_token(jwt_secret: str):
+    """Pre-signed JWT for protected-endpoint tests in TASK-26/27/28.
+
+    Signs a token for the dev seed admin (张三, UUID a0...0001).
+    Tests can call this fixture and then attach `Authorization:
+    Bearer <token>` to their requests instead of going through
+    /auth/dev-login on every test.
+    """
+    from ncmu_backend.auth.jwt_utils import sign_jwt
+    token, _exp = sign_jwt(
+        user_id="a0000001-0000-4000-8000-000000000001",
+        name="张三",
+        secret=jwt_secret,
+    )
+    return token
+
+
+@pytest.fixture
+def respx_mock():
+    """A respx router context — used by TASK-27 to mock Dify SSE upstream.
+
+    `respx.mock()` wraps the entire httpx call surface for the test;
+    routes added inside `with respx_mock as router: router.post(...)`
+    intercept all httpx requests during the test.
+    """
+    return _respx_lib.mock(assert_all_called=False)

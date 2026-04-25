@@ -1,0 +1,85 @@
+"""SQLAlchemy 2.x ORM models — mirror alembic 0001_init_users_chat_sessions.
+
+Tables here MUST stay in sync with the alembic migration. Phase 1 keeps
+both hand-written (no autogenerate) so the migration is the single
+source of truth; `Base.metadata` is exposed only so future task batches
+can switch alembic to autogenerate when the model surface stabilises.
+
+DEPLOY-1 修订：dify_apps / dify_external_kb_configs / dify_app_kb_bindings
+ORM models will be added by TASK-26's batch (they reference alembic
+0002 + 0003 created by TASK-22).
+"""
+from __future__ import annotations
+
+import uuid
+from datetime import datetime
+
+from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, String, func
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+class User(Base):
+    __tablename__ = "users"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True
+    )
+    dingtalk_userid: Mapped[str | None] = mapped_column(
+        String(64), unique=True, nullable=True
+    )
+    name: Mapped[str] = mapped_column(String(64), nullable=False)
+    dept_path: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="true"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    chat_sessions: Mapped[list["ChatSession"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+
+
+class ChatSession(Base):
+    __tablename__ = "chat_sessions"
+    __table_args__ = (
+        CheckConstraint(
+            "user_id IS NOT NULL OR anonymous_session_id IS NOT NULL",
+            name="ck_chat_sessions_user_or_anon",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True
+    )
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=True,
+    )
+    anonymous_session_id: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
+    dify_app_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    dify_conversation_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    title: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    user: Mapped[User | None] = relationship(back_populates="chat_sessions")

@@ -743,6 +743,61 @@ services:
           - fastgpt-app
 
   # =====================================================================
+  # ncmu-backend : Phase 1 FastAPI backend (TASK-25)
+  # ---------------------------------------------------------------------
+  # Hosts the 9 NCMU API endpoints (Phase 1 batch 9): auth/dev-login,
+  # dev/users, apps, chat sessions orchestrator, admin. Reads pg-ncmu
+  # via async asyncpg; talks to Dify Console + FastGPT via the
+  # in-cluster service names.
+  #
+  # entrypoint.sh runs `alembic upgrade head` (single authoritative
+  # caller per D-2) and applies dev_users.sql in dev profile, then
+  # exec's the Dockerfile CMD (uvicorn). Healthcheck targets /healthz
+  # which the FastAPI app serves with the auto-discovered router list.
+  #
+  # depends_on note: pg-ncmu (healthy) is enough — Dify and FastGPT
+  # are dependencies of *individual endpoints* (orchestrator, admin)
+  # and are dialled lazily; if they're down the affected endpoints
+  # return 502/503 but the backend still serves /auth and /dev/users.
+  # =====================================================================
+  ncmu-backend:
+    build:
+      context: ./ncmu-backend
+      dockerfile: Dockerfile
+    image: ncmu-backend:phase1
+    container_name: ncmu-backend
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # docker-internal NCMU_DB_URL — overrides whatever the host-side
+      # .env has (which may use localhost / 127.0.0.1 for psql convenience).
+      NCMU_DB_URL: postgresql://${NCMU_DB_USER:-ncmu_app}:${NCMU_APP_PASSWORD:-CHANGE_ME}@pg-ncmu:5432/${NCMU_DB_NAME:-ncmu}
+      DEPLOY_PROFILE: ${DEPLOY_PROFILE:-dev}
+    depends_on:
+      pg-ncmu:
+        condition: service_healthy
+    healthcheck:
+      # python:3.11-slim ships no curl. Use python's stdlib http.client
+      # to probe /healthz so we don't add an apt layer just to test.
+      test:
+        - CMD-SHELL
+        - >
+          python -c "import http.client,sys;
+          c=http.client.HTTPConnection('localhost',8000,timeout=2);
+          c.request('GET','/healthz');
+          sys.exit(0 if c.getresponse().status==200 else 1)"
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    networks:
+      default:
+        aliases:
+          - ncmu-backend
+    expose:
+      - "8000"
+
+  # =====================================================================
   # ncmu-nginx : NCMU outer gateway (TASK-09)
   # ---------------------------------------------------------------------
   # Single HTTP/S entry point into the NCMU stack. Reverse-proxies
@@ -781,6 +836,12 @@ services:
       - "${NCMU_NGINX_HTTPS_HOST_PORT:-443}:443"
     depends_on:
       dify-nginx:
+        condition: service_started
+      # TASK-25: ncmu-nginx proxies /api/v1/ncmu/* to ncmu-backend:8000.
+      # service_started (not service_healthy) — the backend's healthcheck
+      # has a 15s start_period during which nginx still wants to come up;
+      # nginx returns 502 on those few seconds, then recovers automatically.
+      ncmu-backend:
         condition: service_started
     healthcheck:
       # nginx:latest ships curl at /usr/bin/curl but has no wget; the

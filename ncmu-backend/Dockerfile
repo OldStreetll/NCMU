@@ -6,12 +6,13 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# Phase 1 TASK-22 minimal image: alembic + sqlalchemy + psycopg only.
-# TASK-25 will extend with uvicorn / fastapi / httpx / pyjwt / etc.
-RUN pip install --no-cache-dir \
-    "alembic>=1.13,<2" \
-    "sqlalchemy>=2.0,<2.1" \
-    "psycopg[binary]>=3.1,<3.3"
+# Phase 1 TASK-25: full backend stack. Dependencies are sourced from
+# pyproject.toml (single source of truth — alembic + asyncpg + fastapi
+# share a few sub-deps that pip resolves together) instead of a
+# duplicated `pip install` list here.
+COPY pyproject.toml README.md ./
+COPY src/ ./src/
+RUN pip install --no-cache-dir .
 
 COPY alembic.ini ./
 COPY alembic/ ./alembic/
@@ -20,5 +21,7 @@ COPY scripts/ ./scripts/
 RUN chmod +x scripts/entrypoint.sh
 
 ENTRYPOINT ["./scripts/entrypoint.sh"]
-# Phase 1 batch 8: no web app yet; TASK-25 overrides CMD to uvicorn.
-CMD ["bash"]
+# entrypoint.sh runs `alembic upgrade head` (single authoritative caller
+# per D-2) then exec's the CMD. Default CMD is uvicorn; docker-compose
+# can override for one-off shells / pytest invocation.
+CMD ["uvicorn", "ncmu_backend.main:app", "--host", "0.0.0.0", "--port", "8000"]
