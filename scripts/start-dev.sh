@@ -51,7 +51,27 @@ fernet_self_check() {
     [ -f "$REPO_ROOT/.env" ] || return 0
     local val
     val=$(grep -E '^DIFY_SECRET_KEY=' "$REPO_ROOT/.env" | tail -n1 | cut -d= -f2-)
+    local needs_regen=0
     if [ "$val" = "CHANGE_ME" ] || [ -z "$val" ] || [ ${#val} -ne 44 ]; then
+        needs_regen=1
+    else
+        # Final structural check: try to construct Fernet(val) — catches the
+        # rare case where the value is 44 chars long but contains characters
+        # outside the base64url alphabet (e.g. operator typed in an
+        # openssl rand value of the right length but wrong charset).
+        if ! python3 -c "
+import sys
+from cryptography.fernet import Fernet
+try:
+    Fernet('$val'.encode())
+except Exception:
+    sys.exit(1)
+" >/dev/null 2>&1; then
+            warn "DIFY_SECRET_KEY in .env is 44 chars but not a valid Fernet key; regenerating."
+            needs_regen=1
+        fi
+    fi
+    if [ "$needs_regen" -eq 1 ]; then
         info "Generating Fernet key for DIFY_SECRET_KEY..."
         local new_key
         new_key=$(python3 -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())') \

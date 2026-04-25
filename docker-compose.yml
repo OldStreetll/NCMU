@@ -795,6 +795,50 @@ services:
     networks:
       - default
 
+  # =====================================================================
+  # ncmu-init : one-shot bootstrap runner (TASK-21-A1, D3-E)
+  # =====================================================================
+  # Runs scripts/ncmu_init.py to seed FastGPT mongo team_subscriptions
+  # and activate default models (bge-m3 + MiniMax-M2.7) once the stack
+  # is up. Idempotent — safe to re-run.
+  #
+  # Profile-gated (`init`) so `docker compose up` does NOT spin it up;
+  # invoke it explicitly:
+  #     docker compose run --rm ncmu-init
+  # `run --rm` ignores profile membership, so the gating only excludes
+  # it from `up` (avoiding a perpetual restart loop on a one-shot job).
+  #
+  # depends_on note:
+  #   - pg-fastgpt + fastgpt-mongo: condition: service_healthy
+  #     (both export healthchecks; bootstrap_fastgpt writes mongo and
+  #     reads pg via FastGPT's HTTP API)
+  #   - fastgpt-app:                condition: service_started
+  #     (the upstream image ships NO healthcheck; using service_healthy
+  #     would deadlock on it. start-dev.sh polls FastGPT TCP readiness
+  #     for ~120s before invoking this service.)
+  ncmu-init:
+    image: python:${PYTHON_IMAGE_TAG:-3.11-slim}
+    container_name: ncmu-init
+    networks:
+      - default
+    env_file: .env
+    volumes:
+      - ./scripts:/app/scripts:ro
+    working_dir: /app
+    profiles: ["init"]
+    entrypoint:
+      - sh
+      - -c
+      - 'pip install -q -r scripts/requirements.txt && python3 scripts/ncmu_init.py "$@"'
+      - --
+    depends_on:
+      pg-fastgpt:
+        condition: service_healthy
+      fastgpt-mongo:
+        condition: service_healthy
+      fastgpt-app:
+        condition: service_started
+
 networks:
   default:
     name: ncmu-net
