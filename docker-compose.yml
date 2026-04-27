@@ -857,6 +857,45 @@ services:
       - default
 
   # =====================================================================
+  # ncmu-spa : Phase 1 Web SPA dev runner (TASK-29)
+  # ---------------------------------------------------------------------
+  # Vite dev server inside a node:20-alpine container. Uses a bind mount
+  # so source edits hot-reload from the host. Joins the default network
+  # (ncmu-net) so vite's proxy target `http://ncmu-backend:8000` resolves
+  # via Docker DNS. ncmu-backend is `expose: 8000` only — no host
+  # publish — and the Vite proxy keeps it that way.
+  #
+  # Profile-gated (`dev`) so plain `docker compose up` (which targets the
+  # prod stack — nginx serving baked SPA assets in Phase 6) does NOT
+  # spin up vite. Invoke explicitly:
+  #     docker compose --profile dev up
+  # PLAN-FIX-4 C9-3: this mirrors the existing `ncmu-init profiles:[init]`
+  # one-shot pattern, just with a long-running command.
+  #
+  # No healthcheck: vite dev's "Local: http://localhost:5173/" log line
+  # is the readiness signal; `npm install` cold-cache adds ~5 min before
+  # vite starts. Wait for the log before running smoke tests.
+  # =====================================================================
+  ncmu-spa:
+    image: node:${NODE_IMAGE_TAG:-20-alpine}
+    container_name: ncmu-spa
+    restart: unless-stopped
+    working_dir: /app
+    command:
+      - sh
+      - -c
+      - "npm install && npm run dev -- --host 0.0.0.0"
+    volumes:
+      - ./ncmu-spa:/app
+    ports:
+      - "${NCMU_SPA_HOST_PORT:-5173}:5173"
+    depends_on:
+      - ncmu-backend
+    profiles: ["dev"]
+    networks:
+      - default
+
+  # =====================================================================
   # ncmu-init : one-shot bootstrap runner (TASK-21-A1, D3-E)
   # =====================================================================
   # Runs scripts/ncmu_init.py to seed FastGPT mongo team_subscriptions
