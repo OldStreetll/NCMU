@@ -63,7 +63,16 @@ services:
     ports:
       - "${DIFY_DB_HOST_PORT:-5433}:5432"
     volumes:
-      - ./data/pg-dify:/var/lib/postgresql/data
+      # TASK-33-HOTFIX-1: same fix as pg-ncmu — switched off the
+      # `./data/pg-dify` bind mount because WSL2 → Windows NTFS cannot
+      # honour postgres `initdb`'s `chmod 700`, so any stop+rm cycle
+      # wipes the bind dir and locks the next start in a chmod restart
+      # loop (B-NEW-19 P0). Named volumes live on the Docker VM's ext4
+      # and behave correctly. The override file (only loaded on WSL2)
+      # already targeted the same volume name; this commit promotes the
+      # fix into the base compose so Linux dev/CI hosts also get the
+      # safe default without depending on the override.
+      - pg-dify-data:/var/lib/postgresql/data
       - ./docker/init-db/02-pg-dify.sql:/docker-entrypoint-initdb.d/02-init.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${DIFY_DB_USER:-dify} -d ${DIFY_DB_NAME:-dify}"]
@@ -92,7 +101,8 @@ services:
     ports:
       - "${FASTGPT_DB_HOST_PORT:-5434}:5432"
     volumes:
-      - ./data/pg-fastgpt:/var/lib/postgresql/data
+      # TASK-33-HOTFIX-1: same fix as pg-ncmu / pg-dify — see B-NEW-19 P0.
+      - pg-fastgpt-data:/var/lib/postgresql/data
       - ./docker/init-db/03-pg-fastgpt.sql:/docker-entrypoint-initdb.d/03-init.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${FASTGPT_DB_USER:-fastgpt} -d ${FASTGPT_DB_NAME:-fastgpt}"]
@@ -961,5 +971,7 @@ volumes:
   dify-sandbox-deps:
   dify-sandbox-conf:
   fastgpt-mongo-data:
+  pg-dify-data:
+  pg-fastgpt-data:
   pg-ncmu-data:
   tei-models:
