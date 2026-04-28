@@ -31,7 +31,14 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - ./data/pg-ncmu:/var/lib/postgresql/data
+      # TASK-33 SCOPE-CHANGE: switched from `./data/pg-ncmu` bind to a Docker
+      # named volume. WSL2 → Windows NTFS bind mounts cannot honour the
+      # `chmod 700` postgres `initdb` performs at first boot, so any stop+rm
+      # cycle wipes the bind dir contents and the next start enters a chmod
+      # restart loop (B-NEW-19). Named volumes live on the Docker VM's ext4
+      # and behave correctly. Same pattern is recommended for pg-dify /
+      # pg-fastgpt next; out of scope for this task.
+      - pg-ncmu-data:/var/lib/postgresql/data
       - ./docker/init-db/01-pg-ncmu.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${NCMU_DB_USER:-ncmu_app} -d ${NCMU_DB_NAME:-ncmu}"]
@@ -954,4 +961,5 @@ volumes:
   dify-sandbox-deps:
   dify-sandbox-conf:
   fastgpt-mongo-data:
+  pg-ncmu-data:
   tei-models:
