@@ -6,11 +6,29 @@ overrides, not by mutating the cache.
 """
 from __future__ import annotations
 
+import logging
 from functools import lru_cache
 from typing import List
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+logger = logging.getLogger(__name__)
+
+
+# Sensitive env keys whose CHANGE_ME-prefixed placeholder values are forbidden
+# in prod (raise) and warned in dev. Listed only fields actually declared on
+# `Settings` below — `getattr` would AttributeError otherwise. Prefix-based
+# detection (`startswith`) covers `NCMU_JWT_SECRET`'s padded default
+# `CHANGE_ME_DEV_ONLY_PLACEHOLDER_AT_LEAST_32_BYTES`.
+SENSITIVE_KEYS_PROD_REQUIRED: List[str] = [
+    "NCMU_JWT_SECRET",
+    "DIFY_CONSOLE_API_KEY",
+    "DIFY_APP_DEFAULT_TOKEN",
+    "FASTGPT_API_KEY",
+    "SILICONFLOW_API_KEY",
+]
 
 
 class Settings(BaseSettings):
@@ -56,6 +74,9 @@ class Settings(BaseSettings):
     FASTGPT_BASE_URL: str = "http://fastgpt:3000"
     FASTGPT_API_KEY: str = "CHANGE_ME"
 
+    # --- Embedding (errata-11: SiliconFlow) ------------------------
+    SILICONFLOW_API_KEY: str = "CHANGE_ME"
+
     # --- KB-adapter (read-only reference, not used by backend) -----
     KB_ADAPTER_BASE_URL: str = "http://kb-adapter:8000"
 
@@ -67,6 +88,18 @@ class Settings(BaseSettings):
     @property
     def is_prod(self) -> bool:
         return self.DEPLOY_PROFILE == "prod"
+
+    @model_validator(mode="after")
+    def _validate_sensitive_placeholders(self) -> "Settings":
+        # prod: raise on first hit (avoid noisy multi-error). dev: warn each.
+        for key in SENSITIVE_KEYS_PROD_REQUIRED:
+            value = getattr(self, key)
+            if not value.startswith("CHANGE_ME"):
+                continue
+            if self.is_prod:
+                raise ValueError(f"{key} is placeholder in prod deployment")
+            logger.warning(f"{key} is placeholder; some features may fail")
+        return self
 
 
 @lru_cache(maxsize=1)
