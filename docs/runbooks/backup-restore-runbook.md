@@ -225,10 +225,10 @@ $ dc down -v
 ⚠️  即将执行 docker compose down -v，会删除所有 named volume 数据
 
 当前 volume 列表：
-ncmu_pg-ncmu          local
-ncmu_pg-dify          local
-ncmu_pg-fastgpt       local
-ncmu_fastgpt-mongo    local
+ncmu_pg-ncmu-data          local
+ncmu_pg-dify-data          local
+ncmu_pg-fastgpt-data       local
+ncmu_fastgpt-mongo-data    local
 
 如确定，输入完整字符串 yes-i-want-to-destroy-all-volumes 继续：
 yes-i-want-to-destroy-all-volumes

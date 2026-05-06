@@ -9,7 +9,7 @@
 # Required confirmation phrase: yes-i-want-to-destroy-all-volumes
 # Audit log: data/backups/destructive.log
 
-set -euo pipefail
+set -eEuo pipefail
 
 readonly AUDIT_LOG_DIR="data/backups"
 readonly AUDIT_LOG_FILE="${AUDIT_LOG_DIR}/destructive.log"

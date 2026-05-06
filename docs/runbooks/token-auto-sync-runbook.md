@@ -11,7 +11,7 @@ dev 部署时（`DEPLOY_PROFILE != "prod"`），ncmu-init 容器启动会先跑 
 * 扫 `.env` 中 `PLACEHOLDER_TOKEN_KEYS`（7 个）值是否以 `CHANGE_ME` 起头
 * 命中 → 读 `.env.bootstrap` 凭据 → 调 Dify Console API 拿真 token → 原子写回 `.env`
 
-7 个 token key（`scripts/ncmu_init.py:102-110`）：
+7 个 token key（`scripts/ncmu_init.py:109-117`）：
 
 ```python
 PLACEHOLDER_TOKEN_KEYS = [
@@ -77,7 +77,7 @@ token-sync **不能自动取** `SILICONFLOW_API_KEY`（外部服务无 admin log
 2. 登录后进入「后台 → API Keys → 新建 API Key」（含免费额度）
 3. 复制生成的 `sk-...` 字符串
 4. 写入 `.env.bootstrap` 的 `SILICONFLOW_API_KEY=` 行
-5. 同步**手动**写入 `.env` —— token-sync 命中此 key 时**仅打印 STDERR 引导**（见 §6 路径 1 + `scripts/ncmu_init.py:114-118`），不会从 `.env.bootstrap` 复制到 `.env`
+5. 同步**手动**写入 `.env` —— token-sync 命中此 key 时**仅打印 STDERR 引导**（见 §6 路径 1 + `scripts/ncmu_init.py:116-125`），不会从 `.env.bootstrap` 复制到 `.env`
 
 ### 2.3 FastGPT 凭据（占位）
 
@@ -88,7 +88,7 @@ token-sync **不能自动取** `SILICONFLOW_API_KEY`（外部服务无 admin log
 
 `DIFY_ADMIN_EMAIL` / `DIFY_ADMIN_PASSWORD` = Dify Console **首次 setup 时**设置的凭据。
 
-**来源依据**：[[recover-dify-fastgpt-sop]] §5.2（NCMU-Wiki `reference/recover-dify-fastgpt-sop.md`） — Dify v1.13.3 setup POST `/console/api/setup` 字面接收 plain password；后续 login POST `/console/api/login` 字面接收 base64-encoded password（Dify upstream `api/libs/encryption.py:17`）。`scripts/ncmu_init.py:200-211` 落地此约定（`base64.b64encode(password_plain.encode("utf-8")).decode("ascii")`）。
+**来源依据**：[[recover-dify-fastgpt-sop]] §5.2（NCMU-Wiki `reference/recover-dify-fastgpt-sop.md`） — Dify v1.13.3 setup POST `/console/api/setup` 字面接收 plain password；后续 login POST `/console/api/login` 字面接收 base64-encoded password（Dify upstream `api/libs/encryption.py:17`）。`scripts/ncmu_init.py:207-243` 落地此约定（`base64.b64encode(password_plain.encode("utf-8")).decode("ascii")`）。
 
 **fresh 部署场景**（无既有 Dify 数据库）：
 
@@ -128,7 +128,7 @@ docker compose run --rm ncmu-init
 python scripts/ncmu_init.py
 ```
 
-`DIFY_BASE_URL` 默认值（`scripts/ncmu_init.py:312`）：容器内 `http://dify-api:5001`；host 跑须显式 set：
+`DIFY_BASE_URL` 默认值（`scripts/ncmu_init.py:319`）：容器内 `http://dify-api:5001`；host 跑须显式 set：
 
 ```bash
 DIFY_BASE_URL=http://localhost:3000 python scripts/ncmu_init.py
@@ -190,7 +190,7 @@ chmod 600 .env.bootstrap
 python scripts/ncmu_init.py
 ```
 
-> SILICONFLOW_API_KEY 单独 case：即便 `.env.bootstrap` 已配置，`scripts/ncmu_init.py:295-297` 检测到此 key 后只打印 STDERR `[WARN] SILICONFLOW_API_KEY cannot be auto-synced; please obtain an API Key at https://siliconflow.cn ...`，仍要求操作员手动写到 `.env`。
+> SILICONFLOW_API_KEY 单独 case：即便 `.env.bootstrap` 已配置，`scripts/ncmu_init.py:302-304` 检测到此 key 后只打印 STDERR `[WARN] SILICONFLOW_API_KEY cannot be auto-synced; please obtain an API Key at https://siliconflow.cn ...`，仍要求操作员手动写到 `.env`。
 
 ### 6.2 路径 2：Dify login 失败
 
@@ -224,7 +224,7 @@ curl -sf -X POST http://localhost:3000/console/api/login \
 
 ### 6.3 路径 3：FastGPT API 失败（4 keys 全 pending）
 
-**症状**（`scripts/ncmu_init.py:376-381`）：
+**症状**（`scripts/ncmu_init.py:382-388`）：
 
 ```
 [WARN] FastGPT auto-sync not implemented (v4.14.x team_api_keys endpoint pending spike); placeholders remain: ['FASTGPT_API_KEY', 'FASTGPT_ROOT_KEY', 'FASTGPT_TOKEN_KEY', 'FASTGPT_FILE_TOKEN_KEY']. Operator must seed these directly in .env until follow-up lands.
@@ -259,7 +259,7 @@ $ echo $?
 1
 ```
 
-**`.env` 状态**：完整未变 —— `os.replace` 失败前 `.env.tmp` 已清（`scripts/ncmu_init.py:442-447`），原 `.env` 字节级未触。
+**`.env` 状态**：完整未变 —— `os.replace` 失败前 `.env.tmp` 已清（`scripts/ncmu_init.py:445-455`），原 `.env` 字节级未触。
 
 **常见根因**：
 
@@ -301,13 +301,13 @@ curl -sf http://localhost:3000/console/api/setup
 
 当前 `.env.bootstrap` + `.env` 方案是 **dev-only**：凭据明文落盘 + 9p/NTFS 文件原子重命名 + 单进程假设。prod 须替换为外部 secrets store。
 
-**升级方向**（Phase X 预留 — `scripts/ncmu_init.py` 4 处 `Phase X TODO` 标记对应：line 183 / 288 / 402 / 469）：
+**升级方向**（Phase X 预留 — `scripts/ncmu_init.py` 4 处 `Phase X TODO` 标记对应：line 190 / 295 / 409 / 476）：
 
 * **HashiCorp Vault**：ncmu-init 从 Vault KV v2 拉 `secret/data/ncmu/dify`、`secret/data/ncmu/fastgpt` 等 path → 注入容器 env，**不**落 `.env`
 * **Mozilla sops + age**：`.env.sops.yaml` 入仓（age 加密），ncmu-init 启动时 `sops -d` 解到内存 → 注入 env
 * **K8s Secret + projected volume**：容器 `/var/run/secrets/ncmu/*` 直接挂载，ncmu-init 改读路径
 
-切换信号：`DEPLOY_PROFILE=prod` → `run_token_sync_pre_init()` 早返 `None` 跳过整段 dev 逻辑（`scripts/ncmu_init.py:471-473`）：
+切换信号：`DEPLOY_PROFILE=prod` → `run_token_sync_pre_init()` 早返 `None` 跳过整段 dev 逻辑（`scripts/ncmu_init.py:478-480`）：
 
 ```python
 profile = _read_deploy_profile()
@@ -384,7 +384,7 @@ crontab -e
 
 ## 9. 参考
 
-* `scripts/ncmu_init.py` token-sync 模块（line 90-502）
+* `scripts/ncmu_init.py` token-sync 模块（line 97-509）
 * `.env.bootstrap.example` — 43 行模板含三类字段注释
 * `docs/runbooks/fastgpt-tag-tracking.md` — 同档运维 runbook 风格参考
 * `docs/runbooks/backup-restore-runbook.md` — backup.sh / restore.sh 操作手册（TASK-40）
