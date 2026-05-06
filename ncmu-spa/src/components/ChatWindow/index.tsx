@@ -185,7 +185,8 @@ export function ChatWindow({
               next[assistantIdx] = {
                 ...next[assistantIdx],
                 message_id: d.message_id,
-                retriever_resources: d.retriever_resources,
+                retriever_resources:
+                  d.metadata?.retriever_resources ?? d.retriever_resources ?? [],
               };
               return next;
             });

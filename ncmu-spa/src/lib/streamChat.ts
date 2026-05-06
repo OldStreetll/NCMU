@@ -23,6 +23,7 @@ export interface MessageData {
 export interface MessageEndData {
   message_id?: string;
   retriever_resources?: unknown[];
+  metadata?: { retriever_resources?: unknown[]; [k: string]: unknown };
   [k: string]: unknown;
 }
 

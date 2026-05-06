@@ -126,6 +126,86 @@ describe("ChatWindow", () => {
     expect(onSessionCreated).toHaveBeenCalledWith("new-sess");
   });
 
+  // TASK-44 — message_end retriever_resources dual-read (B-NEW-20).
+  // INDEP-PLAN-1 实测: Dify v1.13.3 SSE message_end frame nests
+  // retriever_resources at `data.metadata.retriever_resources`, not
+  // top-level. ChatWindow:188 must read metadata-nested first, then fall
+  // back to top-level (defensive against schema variants), else `[]`.
+  // INDEP-PLAN-2 A2 spike (Pane 1, 2026-05-06): GET /v1/messages REST
+  // endpoint returns retriever_resources at row top-level — different
+  // shape from SSE — so history-load path (line 65) does NOT need this
+  // dual-read. These cases cover the streaming path only.
+  function chatStreamFetchSpy(frames: string) {
+    return vi.fn(async (url: string | URL) => {
+      const u = String(url);
+      if (u.endsWith("/chat/app-1")) {
+        const enc = new TextEncoder();
+        return new Response(
+          new ReadableStream<Uint8Array>({
+            start(c) {
+              c.enqueue(enc.encode(frames));
+              c.close();
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "text/event-stream" } },
+        );
+      }
+      throw new Error("unexpected fetch: " + u);
+    });
+  }
+
+  it("TASK-44.1 message_end with metadata.retriever_resources renders chips (Dify真实路径)", async () => {
+    const frames =
+      'event: message\ndata: {"answer":"hi"}\n\n' +
+      'event: message_end\ndata: {"message_id":"m-end","metadata":{"retriever_resources":[' +
+      '{"segment_id":"s1","document_id":"d1","document_name":"手册第一节","content":"alpha","score":0.91},' +
+      '{"segment_id":"s2","document_id":"d2","document_name":"手册第二节","content":"beta","score":0.82}' +
+      ']}}\n\n';
+    vi.stubGlobal("fetch", chatStreamFetchSpy(frames));
+
+    render(<ChatWindow appId="app-1" sessionId={null} />);
+    await typeAndSubmit("q");
+
+    await waitFor(() => expect(screen.getByText("hi")).toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.getAllByTestId("retriever-chip").length).toBe(2),
+    );
+    expect(screen.getByText("📄 手册第一节")).toBeInTheDocument();
+    expect(screen.getByText("📄 手册第二节")).toBeInTheDocument();
+  });
+
+  it("TASK-44.2 message_end with top-level retriever_resources falls back (legacy/variant)", async () => {
+    const frames =
+      'event: message\ndata: {"answer":"ok"}\n\n' +
+      'event: message_end\ndata: {"message_id":"m-end","retriever_resources":[' +
+      '{"segment_id":"s9","document_id":"d9","document_name":"老路径来源","content":"x","score":0.5}' +
+      ']}\n\n';
+    vi.stubGlobal("fetch", chatStreamFetchSpy(frames));
+
+    render(<ChatWindow appId="app-1" sessionId={null} />);
+    await typeAndSubmit("q");
+
+    await waitFor(() => expect(screen.getByText("ok")).toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.getAllByTestId("retriever-chip").length).toBe(1),
+    );
+    expect(screen.getByText("📄 老路径来源")).toBeInTheDocument();
+  });
+
+  it("TASK-44.3 message_end without retriever_resources renders no chip strip", async () => {
+    const frames =
+      'event: message\ndata: {"answer":"plain"}\n\n' +
+      'event: message_end\ndata: {"message_id":"m-end"}\n\n';
+    vi.stubGlobal("fetch", chatStreamFetchSpy(frames));
+
+    render(<ChatWindow appId="app-1" sessionId={null} />);
+    await typeAndSubmit("q");
+
+    await waitFor(() => expect(screen.getByText("plain")).toBeInTheDocument());
+    expect(screen.queryAllByTestId("retriever-chip").length).toBe(0);
+    expect(document.querySelector('[data-slot="retriever-chips"]')).toBeNull();
+  });
+
   it("AC#10.3 unmount aborts in-flight stream (no leak)", async () => {
     let cancelled = false;
     // Build a never-closing stream so the reader is parked when we unmount.
