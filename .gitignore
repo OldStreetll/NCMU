@@ -1,6 +1,10 @@
 .env
 .env.local
 .env.*.local
+# TASK-42 token-sync bootstrap; contains plain-text admin credentials.
+# Never tracked. Companion `.env.bootstrap.example` is committed as a
+# template (no real secrets).
+.env.bootstrap
 *.pyc
 __pycache__/
 .venv/
