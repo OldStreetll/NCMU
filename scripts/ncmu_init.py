@@ -26,16 +26,23 @@ Env vars consumed:
   DEPLOY_PROFILE               (token sync; "dev"|"prod"; default dev;
                                 read from os.environ first then .env)
   DIFY_BASE_URL                (token sync; default http://dify-api:5001)
+  DIFY_DB_URL                  (TASK-41 core-data check;
+                                postgres://user:pass@host:port/db;
+                                resolved lazily by _count_dify_apps)
   FASTGPT_BASE_URL             (--bootstrap-fastgpt; default
                                 http://fastgpt:3000)
   FASTGPT_ROOT_KEY             (--bootstrap-fastgpt; reused from the
                                 env that seeds the FastGPT container's
                                 own ROOT_KEY)
-  FASTGPT_MONGO_USER           (--bootstrap-fastgpt)
-  FASTGPT_MONGO_PASSWORD       (--bootstrap-fastgpt)
-  FASTGPT_MONGO_HOST           (--bootstrap-fastgpt; default fastgpt-mongo)
-  FASTGPT_MONGO_PORT           (--bootstrap-fastgpt; default 27017)
-  FASTGPT_MONGO_DB             (--bootstrap-fastgpt; default fastgpt)
+  FASTGPT_MONGO_USER           (--bootstrap-fastgpt + TASK-41 core-data
+                                check; FastGPT mongo URI is built from
+                                FASTGPT_MONGO_* via _build_mongo_uri_from_env)
+  FASTGPT_MONGO_PASSWORD       (--bootstrap-fastgpt + TASK-41 core-data check)
+  FASTGPT_MONGO_HOST           (--bootstrap-fastgpt + TASK-41; default fastgpt-mongo)
+  FASTGPT_MONGO_PORT           (--bootstrap-fastgpt + TASK-41; default 27017)
+  FASTGPT_MONGO_DB             (--bootstrap-fastgpt + TASK-41; default fastgpt)
+  NCMU_INIT_AUTO_YES           (TASK-41 core-data check; "1" → skip
+                                interactive prompt and continue init)
 
 Source: v3.3.1 §18 line 1695 + Phase 1 plan TASK-21 (B-NEW-04/05) +
         Phase 2A plan TASK-42 (B-NEW-14 token sync).
@@ -503,6 +510,207 @@ def run_token_sync_pre_init():
 
 
 # ─────────────────────────────────────────────────────────────────────
+# TASK-41 core-data check (B-NEW-13) — detect Dify apps=0 OR FastGPT
+# datasets=0 at startup; prompt operator to restore-or-continue.
+#
+# Why a separate pre-init step: a `down -v` followed by `up -d` recreates
+# every named volume empty; ncmu-init would then happily seed system tags
+# into a brand-new pg-ncmu while Dify/FastGPT silently came up data-less.
+# Operators only noticed this when chat surfaces returned 404. Catching
+# the empty-volume state here forces a yes/no decision before any further
+# init step touches state.
+# ─────────────────────────────────────────────────────────────────────
+
+
+def _count_dify_apps(dify_db_url: str = None) -> int:
+    """Return ``SELECT COUNT(*) FROM apps`` on the Dify postgres.
+
+    Resolves ``dify_db_url`` at call time (default-None pattern) so test
+    harnesses can monkeypatch the helper outright instead of fighting
+    def-time bound module constants. Lazy-imports psycopg2 to keep the
+    token-sync test path free of optional runtime deps.
+    """
+    if dify_db_url is None:
+        dify_db_url = os.environ.get("DIFY_DB_URL")
+    if not dify_db_url:
+        raise RuntimeError("DIFY_DB_URL env var not set")
+    import psycopg2
+
+    conn = psycopg2.connect(dify_db_url)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM apps")
+            return int(cur.fetchone()[0])
+    finally:
+        conn.close()
+
+
+def _count_fastgpt_datasets(mongo_uri: str = None) -> int:
+    """Return ``db.datasets.countDocuments({})`` on the FastGPT mongo.
+
+    Mongo URI defaults to :func:`_build_mongo_uri_from_env`'s output
+    (resolved at call time, never at def time).
+    """
+    if mongo_uri is None:
+        mongo_uri = _build_mongo_uri_from_env()
+    from pymongo import MongoClient
+
+    client = MongoClient(mongo_uri, serverSelectionTimeoutMS=5000)
+    try:
+        db = client.get_default_database()
+        if db is None:
+            db = client["fastgpt"]
+        return int(db.datasets.count_documents({}))
+    finally:
+        client.close()
+
+
+def check_core_data_present() -> bool:
+    """True iff Dify apps > 0 AND FastGPT datasets > 0.
+
+    Either query failure (e.g. connection refused, table missing) emits
+    a STDERR warning and returns False so the operator gets prompted —
+    fail-safe: an unknown state is treated as "missing" so we never
+    silently bypass the prompt. The two queries are independent;
+    failure of one does not short-circuit the other (both warnings will
+    show if both fail), giving the operator complete diagnostic info.
+    """
+    apps_present = False
+    try:
+        apps_present = _count_dify_apps() > 0
+    except Exception as exc:
+        # Defensive sanitize: psycopg2/pymongo OperationalError text usually
+        # omits credentials, but raw .__str__() of a generic Exception (or a
+        # future driver swap) could leak ' password=...'. Hard-truncate at
+        # the first ' password=' token so credentials never reach STDERR.
+        err_msg = str(exc).split(" password=")[0]
+        print(
+            f"[WARN] Dify apps query failed: {type(exc).__name__}: {err_msg}",
+            file=sys.stderr,
+        )
+
+    datasets_present = False
+    try:
+        datasets_present = _count_fastgpt_datasets() > 0
+    except Exception as exc:
+        err_msg = str(exc).split(" password=")[0]
+        print(
+            f"[WARN] FastGPT datasets query failed: {type(exc).__name__}: {err_msg}",
+            file=sys.stderr,
+        )
+
+    return apps_present and datasets_present
+
+
+def list_recent_snapshots(backups_dir=None, limit: int = 5):
+    """Return up to ``limit`` most-recent snapshot dirs as ``(name, bytes)``.
+
+    Sort key: directory name (timestamp-prefixed dirs sort lexicographically =
+    chronologically). Skips non-directory entries (e.g. ``destructive.log``).
+    Each entry's size is the sum of all regular files directly inside the
+    snapshot dir (single-level, matches backup.sh's flat layout).
+    """
+    if backups_dir is None:
+        backups_dir = REPO_ROOT / "data" / "backups"
+    if not Path(backups_dir).exists():
+        return []
+    entries = []
+    for child in Path(backups_dir).iterdir():
+        if not child.is_dir():
+            continue
+        total = 0
+        for f in child.iterdir():
+            if f.is_file():
+                try:
+                    total += f.stat().st_size
+                except OSError:
+                    pass
+        entries.append((child.name, total))
+    entries.sort(key=lambda e: e[0], reverse=True)
+    return entries[:limit]
+
+
+def _format_bytes(n: int) -> str:
+    """Compact human-readable size (KB/MB/GB)."""
+    for unit in ("B", "KB", "MB", "GB"):
+        if abs(n) < 1024:
+            return f"{n:.1f} {unit}" if unit != "B" else f"{n} B"
+        n /= 1024.0
+    return f"{n:.1f} TB"
+
+
+def run_core_data_check(auto_yes: bool = False):
+    """Pre-init core-data check. Returns int|None.
+
+    Behavior matrix (TASK-41 AC#2-3):
+
+    +---------------------------------------+-------------------------+-----------------+
+    | State                                 | Operator action         | Return value    |
+    +=======================================+=========================+=================+
+    | Both DBs populated                    | (none — silent pass)    | None (continue) |
+    | Either empty + auto_yes=True          | (skipped)               | None (continue) |
+    | Either empty + NCMU_INIT_AUTO_YES=1   | (skipped)               | None (continue) |
+    | Either empty + stdin "yes"            | continue without restore| None (continue) |
+    | Either empty + stdin "no"/other/EOF   | exit, run restore.sh    | 0 (exit clean)  |
+    +---------------------------------------+-------------------------+-----------------+
+
+    Strict ``==`` comparison guards the yes path: ``"yes "`` (trailing
+    space) and ``"YES"`` (uppercase) are NOT accepted (parallel to the
+    REWORK-38 IFS lesson at the python layer — input() returns the line
+    verbatim without IFS stripping, so the strict compare is sufficient).
+    """
+    if check_core_data_present():
+        return None
+
+    auto = auto_yes or os.environ.get("NCMU_INIT_AUTO_YES") == "1"
+
+    snapshots = list_recent_snapshots()
+    print(
+        "[WARN] Dify apps=0 OR FastGPT datasets=0; recent snapshots:",
+        file=sys.stderr,
+    )
+    if not snapshots:
+        print(
+            "  (no snapshots yet — run scripts/backup.sh after first-run setup)",
+            file=sys.stderr,
+        )
+    else:
+        for name, size in snapshots:
+            print(f"  {name}  {size} bytes ({_format_bytes(size)})", file=sys.stderr)
+
+    if auto:
+        print(
+            "[INFO] auto-yes (--auto-yes flag or NCMU_INIT_AUTO_YES=1); "
+            "continuing init without restore.",
+            file=sys.stderr,
+        )
+        return None
+
+    print("", file=sys.stderr)
+    try:
+        answer = input(
+            "输入 yes 继续启动（不 restore），其他任意键退出后跑 "
+            "./scripts/restore.sh <timestamp>: "
+        )
+    except EOFError:
+        answer = ""
+
+    if answer == "yes":
+        print(
+            "[INFO] operator confirmed yes; continuing init without restore.",
+            file=sys.stderr,
+        )
+        return None
+
+    print(
+        "[INFO] exiting ncmu-init. To recover, run: "
+        "./scripts/restore.sh <timestamp>",
+        file=sys.stderr,
+    )
+    return 0
+
+
+# ─────────────────────────────────────────────────────────────────────
 # Existing init flow (unchanged from Phase 1)
 # ─────────────────────────────────────────────────────────────────────
 
@@ -680,6 +888,16 @@ def main() -> int:
         action="store_true",
         help="Skip the dev-mode token-sync pre-step (useful in tests / CI).",
     )
+    parser.add_argument(
+        "--skip-core-data-check",
+        action="store_true",
+        help="Skip the TASK-41 core-data check (useful in tests / CI / first-run before backup exists).",
+    )
+    parser.add_argument(
+        "-y", "--auto-yes",
+        action="store_true",
+        help="Non-interactive mode: skip TASK-41 prompt and continue (assume yes).",
+    )
     args = parser.parse_args()
 
     # Token-sync runs first in dev mode (TASK-42 / B-NEW-14). When the sync
@@ -692,6 +910,15 @@ def main() -> int:
         sync_rc = run_token_sync_pre_init()
         if sync_rc is not None:
             return sync_rc
+
+    # Core-data check (TASK-41 / B-NEW-13). Catches the down -v + up -d
+    # blank-volume scenario before bootstrap_tags seeds tags into a
+    # data-less stack. Runs after token-sync so the operator sees one
+    # actionable prompt at a time.
+    if not args.skip_core_data_check:
+        check_rc = run_core_data_check(auto_yes=args.auto_yes)
+        if check_rc is not None:
+            return check_rc
 
     rc = bootstrap_tags()
     if rc != 0:
