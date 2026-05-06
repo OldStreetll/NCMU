@@ -54,23 +54,29 @@ test.describe("TASK-33 AC#1+#2 happy-path e2e", () => {
     await expect(assistant).toContainText("E2E-TASK-33-MARKER", { timeout: 60_000 });
   });
 
-  // RetrieverChip count assertion separated out and parked as `test.fixme` —
-  // E2E uncovered a real front-end parser bug: Dify SSE message_end frame
-  // delivers retriever_resources under `data.metadata.retriever_resources`,
-  // but `streamChat.ts:25` + `ChatWindow/index.tsx:188` read
-  // `evt.data.retriever_resources` (top-level), so the array never reaches
-  // MessageBubble and the chip strip never renders. Backend SSE evidence
-  // (report §8) proves retriever_resources DOES populate, so the bug is
-  // strictly client-side. Out of TASK-33 scope (src/ app frozen). Remove
-  // `test.fixme` once frontend is patched in a follow-up task.
-  test.fixme("AC#1: retriever-chip strip renders (blocked: frontend metadata-path bug)", async ({ page }) => {
+  // AC#1 retriever-chip strip — unskipped after TASK-44 fixed the
+  // ChatWindow message_end dual-read (commit 6c9ca23). The chip text
+  // contains the FastGPT collection name "TASK-33 手册" (verified in
+  // ncmu-fastgpt-mongo dataset_collections), which kb-adapter forwards
+  // as `title` and Dify maps to `retriever_resources[].document_name`.
+  // RetrieverChip.tsx:53 renders "📄 {document_name}", so the chip text
+  // must contain "TASK-33" — a field-level literal, not a "chip exists"
+  // smoke check.
+  test("AC#1: retriever-chip strip renders with KB document name", async ({ page }) => {
     test.setTimeout(120_000);
     await loginAs(page, ZHANG_SAN_NAME);
     const composer = page.locator('[data-slot="chat-input"] textarea');
     await composer.fill("E2E-TASK-33-MARKER 是什么？请引用原文");
     await page.locator('[data-slot="chat-input"] button').click();
+
     const chips = page.locator('[data-testid="retriever-chip"]');
     await expect.poll(() => chips.count(), { timeout: 60_000 }).toBeGreaterThan(0);
+
+    const retrieverChipsCount = await chips.count();
+    expect(retrieverChipsCount).toBeGreaterThan(0);
+
+    const retrieverChipText = await chips.first().innerText();
+    expect(retrieverChipText).toContain("TASK-33");
   });
 
   // AC#2 multi-turn history (refresh → restore):
