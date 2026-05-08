@@ -98,7 +98,7 @@ echo "    - $CONTAINER_FASTGPT_MONGO  <- fastgpt-mongo.archive.gz" >&2
 echo "    - $CONTAINER_PG_FASTGPT     <- fastgpt-pg.sql.gz" >&2
 echo "    - $CONTAINER_PG_NCMU        <- ncmu-pg.sql.gz" >&2
 echo "" >&2
-printf '输入 yes 确认恢复（覆盖当前数据）: ' >&2
+printf '输入 yes 确认恢复（覆盖当前数据）: \n' >&2
 IFS= read -r CONFIRM || CONFIRM=""
 
 if [[ "$CONFIRM" != "yes" ]]; then
@@ -186,4 +186,4 @@ echo ""
 echo "Restore complete from $TS"
 echo "Total duration: ${DURATION}s"
 echo ""
-echo "请重启相关容器: docker compose restart ncmu-backend ncmu-pg-dify ncmu-fastgpt-mongo ncmu-pg-fastgpt ncmu-pg-ncmu"
+echo "请重启相关容器: docker compose restart ncmu-backend pg-dify fastgpt-mongo pg-fastgpt pg-ncmu"
