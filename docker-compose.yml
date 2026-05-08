@@ -941,6 +941,8 @@ services:
     env_file: .env
     volumes:
       - ./scripts:/app/scripts:ro
+      - ./.env:/app/.env:rw
+      - ./.env.bootstrap:/app/.env.bootstrap:ro
     working_dir: /app
     profiles: ["init"]
     entrypoint:
