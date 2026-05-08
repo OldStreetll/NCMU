@@ -50,6 +50,7 @@ Source: v3.3.1 §18 line 1695 + Phase 1 plan TASK-21 (B-NEW-04/05) +
 import argparse
 import base64
 import datetime as _dt
+import errno
 import os
 import sys
 from pathlib import Path
@@ -406,6 +407,16 @@ def atomic_write_env(updates: dict, env_path=None) -> None:
     path lifts secrets to Vault/sops and does not depend on filesystem
     atomicity at all (errata-09-10-11 §3 衔接清单).
 
+    EBUSY/EXDEV fallback (TASK-65 / B-NEW-33): a docker single-file bind-mount
+    of ``.env`` exposes only the inode at the mountpoint, so ``rename(2)`` from
+    a sibling tmp file fails with EBUSY (16) on Linux ≥4.x or EXDEV (18) on
+    older kernels — the rename target is "across" the mount boundary as far
+    as the kernel is concerned. We catch those two errnos specifically and
+    fall back to an in-place ``write_text`` reading the new content from the
+    just-written tmp (so tmp acts as a forensic / recovery artifact if the
+    in-place write itself fails midway). All other errnos still propagate
+    with tmp cleaned, preserving the existing ENOSPC / EROFS behavior.
+
     Phase X TODO: replace local .env with Vault/sops via TOKEN_SOURCE env.
     """
     if env_path is None:
@@ -446,8 +457,28 @@ def atomic_write_env(updates: dict, env_path=None) -> None:
     tmp.write_text("".join(new_lines), encoding="utf-8")
     try:
         os.replace(str(tmp), str(env_path))
-    except OSError:
-        # Cleanup the half-written temp file before propagating the error.
+    except OSError as exc:
+        if exc.errno in (errno.EBUSY, errno.EXDEV):
+            # single-file bind-mount path: rename(2) cannot cross the mount
+            # boundary. Read the new content back from tmp and truncate+write
+            # env_path in place. tmp is intentionally left in place until the
+            # in-place write succeeds — if it raises midway, the operator
+            # still has the intended new content sitting at .env.tmp for
+            # manual recovery.
+            print(
+                f"[WARN] atomic-write fallback: in-place write to {env_path} "
+                f"(single-file bind-mount detected)",
+                file=sys.stderr,
+            )
+            content = tmp.read_text(encoding="utf-8")
+            env_path.write_text(content, encoding="utf-8")
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+            return
+        # Any other errno (ENOSPC, EROFS, EACCES, ...): cleanup the half-
+        # written temp file and propagate the error unchanged.
         try:
             tmp.unlink()
         except OSError:
