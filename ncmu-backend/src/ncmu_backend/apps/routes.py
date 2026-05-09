@@ -63,6 +63,7 @@ async def list_apps(
                 id=str(entry.get("id") or ""),
                 name=name,
                 type="kb_qa",
+                mode=entry.get("mode") or "chat",
                 description=entry.get("description") or None,
             )
         )

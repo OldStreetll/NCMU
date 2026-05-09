@@ -21,6 +21,13 @@ class AppOut(BaseModel):
         default="kb_qa",
         description="NCMU app category — Phase 1 only kb_qa is exposed",
     )
+    mode: str = Field(
+        ...,
+        description=(
+            "Dify App mode — drives frontend page routing. Values: chat / "
+            "advanced-chat / completion / workflow / agent-chat (TASK-69)."
+        ),
+    )
     description: Optional[str] = Field(
         default=None, description="App description from Dify Console"
     )

@@ -66,6 +66,50 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.dify_client = httpx.AsyncClient(
         timeout=httpx.Timeout(60.0, connect=5.0)
     )
+
+    # TASK-69 (Phase 2B B1): workflow dispatcher 单例（空 registry；B2 4 task
+    # 后续 register 4 mode）。Note: TASK-68 DifyStreamClient takes
+    # (base_url, api_key) — plan 字面 ``DifyStreamClient(app.state.dify_client)``
+    # is a typo, NIT-INDEP68-2 已挂 TASK-71 sweep；dispatcher 仅 hold 引用，
+    # dispatch 不调 self._dify，B2 task 时按需重构。
+    from ncmu_backend.workflow.dify_client import DifyStreamClient
+    from ncmu_backend.workflow.mode_dispatcher import ModeDispatcher
+    app.state.workflow_dispatcher = ModeDispatcher(
+        DifyStreamClient(
+            base_url=settings.DIFY_BASE_URL,
+            api_key=settings.DIFY_APP_DEFAULT_TOKEN,
+        )
+    )
+    # B2 register 锚点（TASK-71/72/73/74 各追加 1 行 dispatcher.register）：
+    # app.state.workflow_dispatcher.register("advanced-chat", AdvancedChatOrchestrator(...))  # TASK-71
+    # app.state.workflow_dispatcher.register("completion",   CompletionOrchestrator(...))     # TASK-72
+    # app.state.workflow_dispatcher.register("workflow",     WorkflowOrchestrator(...))       # TASK-73
+    # app.state.workflow_dispatcher.register("agent-chat",   AgentChatOrchestrator(...))      # TASK-74
+
+    # M7: boot-sweeper — 把上次 process crash / SSE 断连留下的 status='running'
+    # 行兜底为 'timeout'。L-NEW-6 (PLAN-FIX-3): 阈值 15 min 与 spec §5.1 SSE
+    # 心跳 timeout (10 min) 不同概念 — 给 SSE timeout 路径 +5 min cushion 避免
+    # 误清正常即将 finalize 的 run。lifespan startup 期间执行 1 次；不开 cron。
+    from ncmu_backend.db.session import SessionLocal
+    from sqlalchemy import text as sql_text
+    try:
+        async with SessionLocal() as sweep_db:
+            result = await sweep_db.execute(sql_text(
+                "UPDATE workflow_runs "
+                "SET status='timeout', finished_at=NOW(), "
+                "    error_msg='boot-sweeper: process restart' "
+                "WHERE status='running' AND started_at < NOW() - INTERVAL '15 min'"
+            ))
+            await sweep_db.commit()
+            log.info(
+                "workflow_runs boot-sweeper: %d row(s) marked timeout",
+                result.rowcount or 0,
+            )
+    except Exception as exc:
+        # boot-sweeper 失败（DB 不可达 / 表不存在）不阻塞 startup —
+        # 主路径 chat 不依赖 workflow_runs 表，记 warning 即可。
+        log.warning("boot-sweeper skipped: %s", exc)
+
     log.info(
         "ncmu-backend ready — DEPLOY_PROFILE=%s ENABLE_DEV_LOGIN=%s",
         settings.DEPLOY_PROFILE,
