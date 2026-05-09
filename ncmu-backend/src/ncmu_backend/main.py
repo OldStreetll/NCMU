@@ -31,6 +31,7 @@ import ncmu_backend
 from ncmu_backend.config import get_settings
 from ncmu_backend.workflow.advanced_chat import AdvancedChatOrchestrator
 from ncmu_backend.workflow.completion import CompletionOrchestrator
+from ncmu_backend.workflow.workflow import WorkflowOrchestrator
 
 log = logging.getLogger("ncmu_backend.main")
 
@@ -88,7 +89,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # orchestrators to consume"). Avoids spawning N redundant clients.
     app.state.workflow_dispatcher.register("advanced-chat", AdvancedChatOrchestrator(app.state.workflow_dispatcher._dify))  # TASK-71
     app.state.workflow_dispatcher.register("completion", CompletionOrchestrator(app.state.workflow_dispatcher._dify))  # TASK-72
-    # app.state.workflow_dispatcher.register("workflow",     WorkflowOrchestrator(...))       # TASK-73
+    app.state.workflow_dispatcher.register("workflow", WorkflowOrchestrator(app.state.workflow_dispatcher._dify))  # TASK-73
     # app.state.workflow_dispatcher.register("agent-chat",   AgentChatOrchestrator(...))      # TASK-74
 
     # M7: boot-sweeper — 把上次 process crash / SSE 断连留下的 status='running'
