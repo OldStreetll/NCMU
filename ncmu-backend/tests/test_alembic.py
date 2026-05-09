@@ -13,6 +13,7 @@ EXPECTED_TABLES = {
     "dify_external_kb_configs",
     "dify_app_kb_bindings",
     "dify_apps",
+    "workflow_runs",
     "alembic_version",
 }
 
@@ -47,11 +48,11 @@ def test_upgrade_head_creates_all_expected_tables(db_session):
         f"预期表 {EXPECTED_TABLES} 未全部创建；实际：{sorted(rows)}"
     )
 
-    # 再断言 alembic_version 有 0004（最新 head — Phase 2B TASK-67a 起 dify_apps）
+    # 再断言 alembic_version 有 0005（最新 head — Phase 2B TASK-67b 加 workflow_runs + dify_apps.mode）
     version = db_session.execute(
         text("SELECT version_num FROM alembic_version")
     ).scalar_one()
-    assert version == "0004", f"预期 alembic_version=0004，实际 {version}"
+    assert version == "0005", f"预期 alembic_version=0005，实际 {version}"
 
 
 def test_downgrade_base_drops_all_business_tables(test_db_url):

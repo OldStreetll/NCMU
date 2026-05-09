@@ -14,8 +14,17 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, String, func
-from sqlalchemy.dialects.postgresql import UUID as PG_UUID
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    String,
+    Text,
+    func,
+    text,
+)
+from sqlalchemy.dialects.postgresql import JSONB, UUID as PG_UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -99,9 +108,63 @@ class DifyApp(Base):
 
     dify_app_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
+    mode: Mapped[str] = mapped_column(
+        String(32), nullable=False, server_default="chat"
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+
+
+class WorkflowRun(Base):
+    """Single-table audit trail for non-chat orchestration requests.
+
+    Spec §3.2 Q2=A — keep the run history in one wide JSONB-friendly
+    table rather than splitting per-mode. JSONB lets the node-by-node
+    trace and the IO payloads evolve without schema churn while still
+    being queryable via -> / ->> from runbooks.
+
+    FK app_id → dify_apps(dify_app_id) with ON DELETE CASCADE: if an
+    admin removes an app from the cache, its run history goes with it
+    (Phase 2B doesn't promise eternal retention — runs are debug aid,
+    not source of truth).
+    """
+
+    __tablename__ = "workflow_runs"
+
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True), primary_key=True
+    )
+    app_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("dify_apps.dify_app_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    mode: Mapped[str] = mapped_column(String(32), nullable=False)
+    inputs: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    outputs: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default="running"
+    )
+    node_trace: Mapped[list] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb")
+    )
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    error_msg: Mapped[str | None] = mapped_column(Text, nullable=True)

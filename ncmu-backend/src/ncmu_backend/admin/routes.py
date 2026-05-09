@@ -121,13 +121,16 @@ async def sync_apps(
         if not dify_id:
             continue
         name = row.get("name", "Untitled")
+        mode = row.get("mode", "chat")
         stmt = pg_insert(DifyApp).values(
             dify_app_id=dify_id,
             name=name,
+            mode=mode,
         ).on_conflict_do_update(
             index_elements=["dify_app_id"],
             set_={
                 "name": name,
+                "mode": mode,
                 "updated_at": func.now(),
             },
         )
