@@ -1,0 +1,5 @@
+{"event":"agent_thought","thought":"我需要搜索","tool":"web_search","tool_input":{"q":"NCMU"},"observation":null}
+{"event":"agent_thought","thought":"得到结果","tool":"web_search","tool_input":{"q":"NCMU"},"observation":"NCMU is..."}
+{"event":"message","answer":"根据搜索"}
+{"event":"message","answer":"，NCMU 是企业 AI 平台。"}
+{"event":"message_end"}

@@ -30,6 +30,7 @@ from fastapi import FastAPI, Request
 import ncmu_backend
 from ncmu_backend.config import get_settings
 from ncmu_backend.workflow.advanced_chat import AdvancedChatOrchestrator
+from ncmu_backend.workflow.agent_chat import AgentChatOrchestrator
 from ncmu_backend.workflow.completion import CompletionOrchestrator
 from ncmu_backend.workflow.workflow import WorkflowOrchestrator
 
@@ -90,7 +91,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.workflow_dispatcher.register("advanced-chat", AdvancedChatOrchestrator(app.state.workflow_dispatcher._dify))  # TASK-71
     app.state.workflow_dispatcher.register("completion", CompletionOrchestrator(app.state.workflow_dispatcher._dify))  # TASK-72
     app.state.workflow_dispatcher.register("workflow", WorkflowOrchestrator(app.state.workflow_dispatcher._dify))  # TASK-73
-    # app.state.workflow_dispatcher.register("agent-chat",   AgentChatOrchestrator(...))      # TASK-74
+    app.state.workflow_dispatcher.register("agent-chat", AgentChatOrchestrator(app.state.workflow_dispatcher._dify))  # TASK-74
 
     # M7: boot-sweeper — 把上次 process crash / SSE 断连留下的 status='running'
     # 行兜底为 'timeout'。L-NEW-6 (PLAN-FIX-3): 阈值 15 min 与 spec §5.1 SSE
