@@ -152,4 +152,59 @@ describe("streamChat", () => {
     const gen = streamChat("app-1", { query: "hi", conversation_id: null });
     await expect(gen.next()).rejects.toThrow(/no jwt/);
   });
+
+  // -- TASK-70a (PLAN-FIX-3 F-NEW-1 + PLAN-FIX-4 F-FRESH-2) endpointPath param
+  // Default = /chat/${appId} (Phase 1 chat baseline). Override is RELATIVE to
+  // API_BASE — passing the full path "/api/v1/ncmu/..." would yield a
+  // double-prefix 404 (F-FRESH-2 trap).
+
+  it("TASK-70a default endpointPath fetches ${API_BASE}/chat/${appId}", async () => {
+    let capturedUrl = "";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string | URL) => {
+        capturedUrl = String(url);
+        return makeStreamingResponse([]);
+      }),
+    );
+
+    const gen = streamChat("app-X", { query: "hi", conversation_id: null });
+    // Drive the generator far enough to make the underlying fetch call.
+    await gen.next();
+
+    // API_BASE = "/api/v1/ncmu" (src/lib/api.ts:4) → full URL is
+    // "/api/v1/ncmu/chat/app-X". Single API_BASE prefix.
+    expect(capturedUrl).toContain("/chat/app-X");
+    expect(
+      (capturedUrl.match(/\/api\/v1\/ncmu/g) ?? []).length,
+    ).toBe(1);
+  });
+
+  it("TASK-70a explicit endpointPath fetches ${API_BASE}/<path> (no /chat fallback)", async () => {
+    let capturedUrl = "";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string | URL) => {
+        capturedUrl = String(url);
+        return makeStreamingResponse([]);
+      }),
+    );
+
+    const gen = streamChat(
+      "app-X",
+      { inputs: { query: "hi", conversation_id: "" } },
+      undefined,
+      "/workflow/apps/app-X/run",
+    );
+    await gen.next();
+
+    // Hits the explicit override path …
+    expect(capturedUrl).toContain("/workflow/apps/app-X/run");
+    // … and does NOT fall back to /chat/<appId>.
+    expect(capturedUrl).not.toContain("/chat/app-X");
+    // F-FRESH-2: API_BASE appears exactly once.
+    expect(
+      (capturedUrl.match(/\/api\/v1\/ncmu/g) ?? []).length,
+    ).toBe(1);
+  });
 });
