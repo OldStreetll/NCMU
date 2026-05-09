@@ -83,3 +83,25 @@ class ChatSession(Base):
     )
 
     user: Mapped[User | None] = relationship(back_populates="chat_sessions")
+
+
+class DifyApp(Base):
+    """Dify App cache table — populated by admin POST /sync_apps (TASK-67a).
+
+    mode column lands in TASK-67b alongside workflow_runs (per the spec the
+    workflow-runs FK targets dify_apps.dify_app_id, so the cache must exist
+    first). Phase 2B B1 keeps this table minimal: PK + display name + audit
+    timestamps. No FK from dify_app_kb_bindings yet — that's the Phase 3
+    回补 referenced in alembic 0003's docstring.
+    """
+
+    __tablename__ = "dify_apps"
+
+    dify_app_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )

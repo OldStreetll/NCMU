@@ -45,3 +45,17 @@ class BindingOut(BaseModel):
     dify_app_id: str = Field(..., description="Dify App UUID (no FK in Phase 1; dify_apps cache table deferred)")
     external_kb_config_id: UUID = Field(..., description="FK → dify_external_kb_configs.id")
     bound_at: datetime
+
+
+class SyncAppsResponse(BaseModel):
+    """Response for POST /api/v1/ncmu/admin/sync_apps (TASK-67a).
+
+    `upserted` counts rows that successfully went through the
+    INSERT … ON CONFLICT DO UPDATE statement (i.e., rows that had a
+    Dify App `id`). `total_console` is the unfiltered Dify Console
+    page size — `total_console - upserted` reveals how many rows were
+    skipped (typically: missing id).
+    """
+
+    upserted: int = Field(description="UPSERT 命中条数（含 INSERT + UPDATE）")
+    total_console: int = Field(description="Dify Console 返回的总条数")
