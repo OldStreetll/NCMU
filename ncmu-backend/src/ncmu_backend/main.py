@@ -30,6 +30,7 @@ from fastapi import FastAPI, Request
 import ncmu_backend
 from ncmu_backend.config import get_settings
 from ncmu_backend.workflow.advanced_chat import AdvancedChatOrchestrator
+from ncmu_backend.workflow.completion import CompletionOrchestrator
 
 log = logging.getLogger("ncmu_backend.main")
 
@@ -86,7 +87,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # DifyStreamClient (per dispatcher.py docstring: "stores the reference for B2
     # orchestrators to consume"). Avoids spawning N redundant clients.
     app.state.workflow_dispatcher.register("advanced-chat", AdvancedChatOrchestrator(app.state.workflow_dispatcher._dify))  # TASK-71
-    # app.state.workflow_dispatcher.register("completion",   CompletionOrchestrator(...))     # TASK-72
+    app.state.workflow_dispatcher.register("completion", CompletionOrchestrator(app.state.workflow_dispatcher._dify))  # TASK-72
     # app.state.workflow_dispatcher.register("workflow",     WorkflowOrchestrator(...))       # TASK-73
     # app.state.workflow_dispatcher.register("agent-chat",   AgentChatOrchestrator(...))      # TASK-74
 
