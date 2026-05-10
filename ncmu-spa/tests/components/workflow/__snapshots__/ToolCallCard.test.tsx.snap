@@ -1,0 +1,72 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`ToolCallCard > (a) snapshot — completed tool call renders title + status tag + input + output 1`] = `
+<DocumentFragment>
+  <div
+    class="ant-card ant-card-bordered ant-card-small css-dev-only-do-not-override-mncuj7"
+    data-status="completed"
+    data-testid="tool-call-card"
+    style="margin-bottom: 8px;"
+  >
+    <div
+      class="ant-card-head"
+    >
+      <div
+        class="ant-card-head-wrapper"
+      >
+        <div
+          class="ant-card-head-title"
+        >
+          <span
+            style="display: flex; align-items: center; gap: 8px;"
+          >
+            <span>
+              weather_lookup
+            </span>
+            <span
+              class="ant-tag ant-tag-success css-dev-only-do-not-override-mncuj7"
+              data-testid="tool-call-status-tag"
+            >
+              已完成
+            </span>
+          </span>
+        </div>
+      </div>
+    </div>
+    <div
+      class="ant-card-body"
+    >
+      <div
+        data-testid="tool-call-input"
+      >
+        <strong>
+          输入：
+        </strong>
+        <pre
+          style="margin: 0px; font-size: 12px; white-space: pre-wrap;"
+        >
+          {
+  "query": "What's the weather in 西安?"
+}
+        </pre>
+      </div>
+      <div
+        data-testid="tool-call-output"
+        style="margin-top: 8px;"
+      >
+        <strong>
+          输出：
+        </strong>
+        <pre
+          style="margin: 0px; font-size: 12px; white-space: pre-wrap;"
+        >
+          {
+  "temp_c": 22,
+  "sky": "晴"
+}
+        </pre>
+      </div>
+    </div>
+  </div>
+</DocumentFragment>
+`;
