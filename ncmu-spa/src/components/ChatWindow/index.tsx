@@ -29,14 +29,30 @@ const NCMU_EVENT_NAMES: ReadonlySet<string> = new Set<string>([
 
 export interface ChatWindowProps {
   appId: string;
-  // Caller-controlled active session — initial mount value comes from URL param,
-  // post-mount changes (only via SessionList click in TASK-32) trigger history
-  // refetch. URL-driven changes must NOT update this prop (AC#4 C9-2 hard rule).
+  // NCMU UUID (`ChatSession.id`) of the active session. Identifies the row
+  // for the REST endpoints — drives the `/sessions/<sessionId>/messages`
+  // history fetch below and seeds the URL slot. Caller-controlled: initial
+  // mount value comes from URL param, post-mount changes (only via
+  // SessionList click in TASK-32) trigger history refetch. URL-driven
+  // changes must NOT update this prop (AC#4 C9-2 hard rule).
   sessionId: string | null;
+  // TASK-FIX-50 (B-NEW-50): dify upstream `conversation_id` of the active
+  // session. SEPARATE from `sessionId` because the backend uses two
+  // identification regimes — REST endpoints key off NCMU UUID
+  // (sessions/routes.py:88), the streaming-chat orchestrator keys off
+  // dify_conversation_id (chat/orchestrator.py:109). Used to seed
+  // activeConvRef so the streaming body's `conversation_id` field routes
+  // to the right upstream conversation. Omitted / null in the cold-bookmark
+  // mount case: ChatWindow self-resolves it from the messages-fetch
+  // response below (the Dify message rows carry `conversation_id`).
+  conversationId?: string | null;
   // Notify parent when the backend creates a new conversation mid-stream.
-  // Parent's sole job: navigate(replace:true). Parent MUST NOT update its
-  // own sessionId state from this — that would invalidate the in-flight
-  // stream by triggering the [sessionId] history-refetch effect below.
+  // The argument is the NCMU UUID (drives URL navigate + rail refetch);
+  // ChatWindow has already updated its internal activeConvRef with the
+  // dify_conversation_id from the same envelope, so the parent does NOT
+  // need to track that side. Parent MUST NOT update its own sessionId
+  // state from this — that would invalidate the in-flight stream by
+  // triggering the [sessionId] history-refetch effect below.
   onSessionCreated?: (sessionId: string) => void;
   // TASK-70a (PLAN-FIX-3 H-NEW-1): forward NCMU SSE envelope events
   // (`node_started` / `node_finished` / `workflow_finished` / `agent_thought`
@@ -109,22 +125,27 @@ function flattenDifyMessages(rows: DifyMessageRow[]): ChatMessage[] {
 // backend WorkflowRunRequest schema; chat endpoint expects flat
 // `{query, conversation_id}` per Phase 1 contract. `useWorkflowShape` keys
 // off whether `streamEndpointOverride` is set (chat path = undefined).
-// `sessionId ?? ""` for workflow shape because WorkflowRunRequest's
+// `conversationId ?? ""` for workflow shape because WorkflowRunRequest's
 // `conversation_id` is a Pydantic str field (no `Optional[]`).
+//
+// TASK-FIX-50: param renamed `sessionId` → `conversationId` to reflect the
+// post-bug-fix semantics — the value here is `activeConvRef.current` which
+// holds the Dify upstream conversation_id, not the NCMU session UUID.
 function buildBody(
   text: string,
-  sessionId: string | null,
+  conversationId: string | null,
   useWorkflowShape: boolean,
 ): Record<string, unknown> {
   if (useWorkflowShape) {
-    return { inputs: { query: text, conversation_id: sessionId ?? "" } };
+    return { inputs: { query: text, conversation_id: conversationId ?? "" } };
   }
-  return { query: text, conversation_id: sessionId };
+  return { query: text, conversation_id: conversationId };
 }
 
 export function ChatWindow({
   appId,
   sessionId,
+  conversationId = null,
   onSessionCreated = () => {},
   onNcmuEvent,
   streamEndpointOverride,
@@ -132,11 +153,14 @@ export function ChatWindow({
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [streaming, setStreaming] = useState(false);
 
-  // Tracks the conversation that subsequent submits should continue. Starts
-  // from `sessionId` prop and is rewritten in-place when the backend emits
-  // ncmu.session_created mid-stream — does NOT trigger a re-render of the
-  // history fetch effect (kept in a ref).
-  const activeConvRef = useRef<string | null>(sessionId);
+  // Tracks the dify_conversation_id that subsequent submits should continue
+  // (TASK-FIX-50: NOT the NCMU session UUID — the streaming-chat orchestrator
+  // queries `ChatSession.dify_conversation_id == conversation_id`). Seeded
+  // from the `conversationId` prop, back-filled from the messages-fetch
+  // response in the cold-bookmark case, and rewritten in-place when the
+  // backend emits ncmu.session_created mid-stream. Kept in a ref so post-
+  // mint mutation does NOT trigger the history-fetch effect.
+  const activeConvRef = useRef<string | null>(conversationId);
   const abortRef = useRef<AbortController | null>(null);
 
   // unmount cleanup — must abort any in-flight stream
@@ -147,13 +171,16 @@ export function ChatWindow({
     [],
   );
 
-  // sessionId prop change: post-mount switch initiated by parent (e.g.
-  // TASK-32 SessionList click). Abort current stream, sync activeConvRef,
-  // fetch fresh history. Initial mount also runs this once.
+  // sessionId / conversationId prop change: post-mount switch initiated by
+  // parent (e.g. TASK-32 SessionList click). Abort current stream, sync
+  // activeConvRef, fetch fresh history. Initial mount also runs this once.
   useEffect(() => {
     abortRef.current?.abort();
     abortRef.current = null;
-    activeConvRef.current = sessionId;
+    // Prefer the explicit conversationId prop (rail-click path); the cold-
+    // bookmark fallback below resolves it from the messages response when
+    // the parent only knew the NCMU UUID.
+    activeConvRef.current = conversationId;
 
     if (!sessionId) {
       setMessages([]);
@@ -165,6 +192,16 @@ export function ChatWindow({
       .then((resp) => {
         if (cancelled) return;
         setMessages(flattenDifyMessages(resp.data));
+        // TASK-FIX-50 bookmark fallback: when the parent mounts from a URL
+        // it knows only the NCMU UUID, so `conversationId` arrives null.
+        // The Dify message rows carry `conversation_id` (the upstream id);
+        // adopt the first row's value so a subsequent submit on this
+        // bookmarked URL routes to the right upstream conversation rather
+        // than starting a new one.
+        if (!activeConvRef.current && resp.data.length > 0) {
+          const fromHistory = resp.data[0]?.conversation_id;
+          if (fromHistory) activeConvRef.current = fromHistory;
+        }
       })
       .catch((e: unknown) => {
         if (cancelled) return;
@@ -175,7 +212,7 @@ export function ChatWindow({
     return () => {
       cancelled = true;
     };
-  }, [sessionId]);
+  }, [sessionId, conversationId]);
 
   const showSseError = useCallback((err: ErrorData) => {
     // PLAN-FIX-1: backend collapses Dify SSE error strings + INSERT/JWT/param
@@ -219,11 +256,32 @@ export function ChatWindow({
         )) {
           switch (evt.event) {
             case "ncmu.session_created": {
-              const d = evt.data as SessionCreatedData;
-              const newId = d.session_id;
-              if (newId && newId !== activeConvRef.current) {
-                activeConvRef.current = newId;
-                onSessionCreated(newId);
+              // TASK-FIX-50 (B-NEW-50): backend `chat/orchestrator.py:184-189`
+              // emits BOTH `session_id` (NCMU UUID, drives URL + rail) AND
+              // `dify_conversation_id` (drives streaming routing). Pre-fix
+              // we stored `session_id` in activeConvRef which then went into
+              // the next submit's body — orchestrator's
+              // `ChatSession.dify_conversation_id == conversation_id` lookup
+              // never matched and we got 9001 on every send into the freshly-
+              // minted session. The two ids must be tracked separately.
+              //
+              // streamChat.ts `SessionCreatedData` declares
+              // `conversation_id?` but the actual envelope ships
+              // `dify_conversation_id`; aligning the type is out of scope
+              // for TASK-FIX-50 (streamChat.ts is restricted), so widen the
+              // cast locally and prefer the actual field name with a
+              // fallback for forward-compat.
+              const d = evt.data as SessionCreatedData & {
+                dify_conversation_id?: string;
+              };
+              const newNcmuId = d.session_id;
+              const newDifyConvId =
+                d.dify_conversation_id ?? d.conversation_id ?? null;
+              if (newDifyConvId && newDifyConvId !== activeConvRef.current) {
+                activeConvRef.current = newDifyConvId;
+              }
+              if (newNcmuId) {
+                onSessionCreated(newNcmuId);
               }
               break;
             }

@@ -176,13 +176,22 @@ describe("<SessionList>", () => {
     expect(deleteCall![0]).toBe(`/api/v1/ncmu/sessions/${sampleSessions[0].id}`);
   });
 
-  it("AC#5 — clicking a session fires onChange(sessionId)", async () => {
+  it("AC#5 — clicking a session fires onChange with the full Session object (TASK-FIX-50 / B-NEW-50)", async () => {
     queueListResponse();
     const onChange = vi.fn();
     render(<SessionList onChange={onChange} />);
     const item = await screen.findByText("薪资问题");
     fireEvent.click(item);
     expect(onChange).toHaveBeenCalledTimes(1);
-    expect(onChange).toHaveBeenCalledWith(sampleSessions[1].id);
+    // Whole row, not just the id — the consumer needs both `id` (NCMU UUID,
+    // for /sessions/<x>/messages + URL) and `dify_conversation_id` (for the
+    // streaming-chat body's conversation_id). Pre-fix we passed only
+    // `session.id` and historical-session sends got 9001 because the
+    // orchestrator queries by dify_conversation_id, not NCMU UUID.
+    expect(onChange).toHaveBeenCalledWith(sampleSessions[1]);
+    const arg = onChange.mock.calls[0][0] as Session;
+    expect(arg.id).toBe(sampleSessions[1].id);
+    expect(arg.dify_conversation_id).toBe(sampleSessions[1].dify_conversation_id);
+    expect(arg.dify_conversation_id).not.toBe(arg.id); // distinct id spaces
   });
 });

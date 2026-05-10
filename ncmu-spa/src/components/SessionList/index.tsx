@@ -29,8 +29,16 @@ export type SessionListHandle = {
 };
 
 export type SessionListProps = {
+  // NCMU UUID (`Session.id`) of the active session — drives row highlight
+  // and matches the URL slot `/chat/:sessionId` (which carries the NCMU id).
   selectedId?: string;
-  onChange?: (sessionId: string) => void;
+  // TASK-FIX-50 (B-NEW-50): forward the entire Session row, not just one
+  // id. The consumer needs both `id` (NCMU UUID, for /sessions/<x>/messages
+  // + URL) and `dify_conversation_id` (for the streaming-chat body's
+  // conversation_id field — backend `chat/orchestrator.py:109` queries
+  // `ChatSession.dify_conversation_id == conversation_id`). Passing only
+  // `session.id` was the cause of the historical-session 9001 bug.
+  onChange?: (session: Session) => void;
 };
 
 export const SessionList = forwardRef<SessionListHandle, SessionListProps>(
@@ -116,7 +124,7 @@ export const SessionList = forwardRef<SessionListHandle, SessionListProps>(
                 key={session.id}
                 session={session}
                 selected={session.id === selectedId}
-                onSelect={() => onChange?.(session.id)}
+                onSelect={() => onChange?.(session)}
                 onRename={() => setRenameTarget(session)}
                 onDelete={() => handleDelete(session)}
               />
