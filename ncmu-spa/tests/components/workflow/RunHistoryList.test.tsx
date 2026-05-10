@@ -121,4 +121,82 @@ describe("<RunHistoryList>", () => {
     // discriminator here.
     expect(container.querySelector(".ant-list")).toBeNull();
   });
+
+  it("AC#FIX-I1 — timeout / cancelled / db_error tags render with their distinct preset color classes (INDEP-70b NIT-70b-4 → I-1)", () => {
+    // Backend `crud.py:29-32` defines 7 terminal RunStatus literals; the
+    // pre-fix STATUS_COLOR map only covered succeeded / failed / stopped /
+    // exception → timeout / cancelled / db_error fell through to the
+    // "default" branch and rendered as the same grey tag. Verify the three
+    // mappings emitted by TASK-FIX-I1 reach the DOM as distinct antd preset
+    // color classes.
+    const failureRuns: WorkflowRunSummary[] = [
+      {
+        run_id: "44444444-4444-4444-8444-444444444444",
+        app_id: "app-1",
+        mode: "completion",
+        status: "timeout",
+        started_at: "2026-05-09T13:00:00Z",
+        finished_at: "2026-05-09T13:01:30Z",
+      },
+      {
+        run_id: "55555555-5555-4555-8555-555555555555",
+        app_id: "app-1",
+        mode: "completion",
+        status: "cancelled",
+        started_at: "2026-05-09T14:00:00Z",
+        finished_at: "2026-05-09T14:00:05Z",
+      },
+      {
+        run_id: "66666666-6666-4666-8666-666666666666",
+        app_id: "app-1",
+        mode: "completion",
+        status: "db_error",
+        started_at: "2026-05-09T15:00:00Z",
+        finished_at: "2026-05-09T15:00:01Z",
+      },
+    ];
+    mockUseWorkflowRunList.mockReturnValue({
+      data: failureRuns,
+      isLoading: false,
+      isError: false,
+      error: null,
+    });
+    render(<RunHistoryList appId="app-1" />);
+
+    const timeoutTag = screen
+      .getByTestId(`run-row-${failureRuns[0]!.run_id}`)
+      .querySelector(".ant-tag");
+    expect(timeoutTag).not.toBeNull();
+    expect(timeoutTag!.className).toContain("ant-tag-gold");
+    expect(timeoutTag!.textContent).toBe("timeout");
+
+    const cancelledTag = screen
+      .getByTestId(`run-row-${failureRuns[1]!.run_id}`)
+      .querySelector(".ant-tag");
+    expect(cancelledTag).not.toBeNull();
+    // cancelled = "default" → antd 5 emits no preset color suffix on the
+    // tag root; assert the absence of any preset color class so a future
+    // mapping accidentally collapsing back to "default" still passes
+    // while a wrong preset value would fail.
+    expect(cancelledTag!.className).not.toMatch(
+      /ant-tag-(green|red|orange|magenta|volcano|gold|blue|cyan|geekblue|purple|pink|lime)\b/,
+    );
+    expect(cancelledTag!.textContent).toBe("cancelled");
+
+    const dbErrorTag = screen
+      .getByTestId(`run-row-${failureRuns[2]!.run_id}`)
+      .querySelector(".ant-tag");
+    expect(dbErrorTag).not.toBeNull();
+    expect(dbErrorTag!.className).toContain("ant-tag-volcano");
+    expect(dbErrorTag!.textContent).toBe("db_error");
+
+    // All three tag classNames are pairwise distinct — the regression
+    // this case guards against is precisely "all three look the same".
+    const classes = [
+      timeoutTag!.className,
+      cancelledTag!.className,
+      dbErrorTag!.className,
+    ];
+    expect(new Set(classes).size).toBe(3);
+  });
 });

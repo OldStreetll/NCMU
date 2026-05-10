@@ -9,11 +9,35 @@ export interface RunHistoryListProps {
   onRowClick?: (runId: string) => void;
 }
 
+// TASK-FIX-I1: full 8-status coverage. The terminal-status set is the
+// `RunStatus` Literal at backend `ncmu-backend/src/ncmu_backend/workflow/
+// crud.py:29-32` (succeeded / failed / stopped / exception / timeout /
+// cancelled / db_error); `running` is the initial state written at
+// `crud.py:50`. Pre-fix only 5 were mapped, so timeout / cancelled /
+// db_error fell through to "default" → three semantically distinct
+// failure modes rendered as indistinguishable grey tags (INDEP-70b
+// fresh-eyes, NIT-70b-4 → I-1).
+//
+// Palette intent:
+//   - succeeded:  green   — terminal success.
+//   - failed:     red     — hard logical failure.
+//   - stopped:    orange  — interrupted by the system mid-flight.
+//   - exception:  magenta — uncaught code-level exception.
+//   - timeout:    gold    — retry-able / latency miss (yellow warning).
+//   - cancelled:  default — explicit user cancel, neutral grey.
+//   - db_error:   volcano — persistence-layer failure (high contrast).
+//   - running:    blue    — initial / non-terminal.
+// Antd preset names; the trailing `?? "default"` fallback below is
+// deliberately preserved so any future RunStatus literal added
+// backend-side keeps rendering rather than crashing.
 const STATUS_COLOR: Record<string, string> = {
   succeeded: "green",
   failed: "red",
   stopped: "orange",
   exception: "magenta",
+  timeout: "gold",
+  cancelled: "default",
+  db_error: "volcano",
   running: "blue",
 };
 
