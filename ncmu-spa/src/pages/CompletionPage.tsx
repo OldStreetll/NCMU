@@ -1,14 +1,21 @@
 // TASK-76 (Phase 2B B3) — completion-mode page.
 //
 // Layout: input form + 输出 Card 主区 / 历史 sider 复用 RunHistoryList.
-// Data flow: useAppParameters → DynamicInputForm; runWorkflow streams text
-// chunks via the callback into `output` state. runWorkflow's callback may
-// also be invoked with an NcmuSseEvent (workflow envelope) — completion
-// mode ignores those and only consumes string chunks.
+// Data flow: useAppParameters → DynamicInputForm; runWorkflow drives the
+// completion-mode SSE stream and invokes the callback per frame.
+//
+// ★ REWORK-76-INDEP / C-INDEP-1: backend `completion.py` orchestrator
+// accumulates Dify upstream `message` / `text_chunk` frames into a single
+// `accumulated_text` and emits ONE `workflow_finished` NcmuSseEvent at
+// upstream `message_end` (data.outputs.answer = full text). The NCMU SSE
+// stream therefore never carries a `message` event for this mode, so a
+// pure `typeof chunk === "string"` branch silently drops the only frame.
+// We keep the string branch (forward-compat for a future per-token mode)
+// but add the `workflow_finished` envelope branch as the actual sink.
 
 import { useParams } from "react-router-dom";
 import { useState } from "react";
-import { Card, Layout } from "antd";
+import { Card, Layout, notification } from "antd";
 import { DynamicInputForm } from "@/components/workflow/DynamicInputForm";
 import { RunHistoryList } from "@/components/workflow/RunHistoryList";
 import { runWorkflow, useAppParameters } from "@/lib/api";
@@ -25,8 +32,24 @@ export function CompletionPage() {
     try {
       await runWorkflow(appId!, values, (chunk) => {
         if (typeof chunk === "string") {
+          // Reserved for a future per-token streaming mode; current
+          // backend completion orchestrator does not emit string chunks.
           setOutput((prev) => prev + chunk);
+          return;
         }
+        if (chunk.event_type === "workflow_finished") {
+          const ans = (chunk.data as { outputs?: { answer?: unknown } })
+            .outputs?.answer;
+          if (typeof ans === "string") setOutput(ans);
+        }
+      });
+    } catch (err) {
+      // ★ REWORK-76-INDEP / I-INDEP-2: surface upstream / network failures
+      // as a toast instead of leaking an unhandled promise to React (which
+      // would land on the error boundary and blank the page).
+      notification.error({
+        message: "执行失败",
+        description: err instanceof Error ? err.message : String(err),
       });
     } finally {
       setSubmitting(false);

@@ -65,16 +65,23 @@ export { BASE as API_BASE };
 // runWorkflow: thin async wrapper over `streamChat` that drives the workflow
 // SSE endpoint `/workflow/apps/{appId}/run` (relative to API_BASE — F-FRESH-2
 // double-prefix trap). The callback receives one of two shapes per frame:
-//   - string         : completion-mode answer text chunks (unwrapped from
-//                      the upstream `message` event's `data.answer`).
+//   - string         : reserved for a future per-token streaming mode. No
+//                      current backend orchestrator emits this on the
+//                      workflow endpoint — completion.py / advanced_chat.py /
+//                      workflow.py / agent_chat.py all collapse upstream
+//                      partial-text frames into a single `workflow_finished`
+//                      envelope (see REWORK-76-INDEP C-INDEP-1). Kept in
+//                      the union so a later orchestrator can light it up
+//                      without changing this signature.
 //   - NcmuSseEvent   : workflow-mode envelope frames (node_started /
 //                      node_finished / workflow_finished / agent_thought /
 //                      tool_call). The streamChat parser yields these with
 //                      the FULL envelope on `evt.data` (backend routes.py
 //                      serializes the whole NcmuSseEvent to the SSE data
 //                      line — see streamChat.ts line 60-67 comment).
-// Caller examples: TASK-76 CompletionPage filters string chunks; TASK-77
-// WorkflowRunPage `if (typeof evt !== "string")` branches on envelope frames.
+// Caller examples: TASK-76 CompletionPage reads
+// `chunk.event_type === "workflow_finished"` → outputs.answer; TASK-77
+// WorkflowRunPage iterates envelope frames into a node trace.
 
 export interface QueryResult<T> {
   data: T | undefined;

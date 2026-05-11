@@ -40,10 +40,12 @@ vi.mock("@/hooks/useWorkflowRuns", () => ({
 }));
 
 // Imports come AFTER vi.mock so the mocked exports resolve.
+import { notification } from "antd";
 import { CompletionPage } from "@/pages/CompletionPage";
 import { useAppParameters, runWorkflow } from "@/lib/api";
 import type { ParameterSchema } from "@/components/workflow/DynamicInputForm";
 import { useWorkflowRunList } from "@/hooks/useWorkflowRuns";
+import type { NcmuSseEvent } from "@/lib/sse-types";
 
 const mockUseAppParameters = vi.mocked(useAppParameters);
 const mockRunWorkflow = vi.mocked(runWorkflow);
@@ -222,5 +224,83 @@ describe("<CompletionPage>", () => {
     });
     // The placeholder must have been replaced.
     expect(screen.queryByText("（待执行）")).not.toBeInTheDocument();
+  });
+
+  // REWORK-76-INDEP / C-INDEP-1: backend completion.py orchestrator
+  // (`ncmu-backend/.../workflow/completion.py`) accumulates Dify upstream
+  // `message` / `text_chunk` frames into `accumulated_text` and emits a
+  // SINGLE `workflow_finished` NcmuSseEvent envelope at `message_end` —
+  // it never emits a `message` event on the NCMU SSE stream. Pre-fix,
+  // CompletionPage filtered to `typeof chunk === "string"` only and
+  // silently dropped the envelope, leaving the output Card permanently
+  // empty in production. This test asserts the envelope branch wires
+  // `data.outputs.answer` straight into the output region.
+  it("AC-INDEP-1 — workflow_finished envelope → outputs.answer rendered (real backend shape)", async () => {
+    mockUseAppParameters.mockReturnValue({
+      data: [
+        { variable: "topic", label: "主题", type: "text" },
+      ] as ParameterSchema[],
+      isLoading: false,
+      isError: false,
+      error: null,
+    });
+
+    const envelope: NcmuSseEvent = {
+      event_type: "workflow_finished",
+      run_id: "00000000-0000-4000-8000-000000000abc",
+      timestamp: "2026-05-11T10:00:00Z",
+      data: {
+        status: "succeeded",
+        outputs: { answer: "Hello world from completion orchestrator." },
+        total_elapsed_ms: 42,
+      },
+    };
+    mockRunWorkflow.mockImplementation(async (_appId, _values, onChunk) => {
+      onChunk(envelope);
+    });
+
+    renderAt();
+    fireEvent.click(screen.getByRole("button", { name: /提\s?交/ }));
+
+    await waitFor(() => {
+      expect(
+        screen.getByText("Hello world from completion orchestrator."),
+      ).toBeInTheDocument();
+    });
+    // Placeholder gone — the envelope set output state.
+    expect(screen.queryByText("（待执行）")).not.toBeInTheDocument();
+  });
+
+  // REWORK-76-INDEP / I-INDEP-2 (76 部分): handleSubmit had no try/catch,
+  // so a runWorkflow rejection would bubble to React as an unhandled
+  // promise. Post-fix it surfaces via antd notification.error and the
+  // submitting state still settles back to false.
+  it("AC-INDEP-2 — runWorkflow rejection → notification.error called + submitting settles", async () => {
+    mockUseAppParameters.mockReturnValue({
+      data: [
+        { variable: "topic", label: "主题", type: "text" },
+      ] as ParameterSchema[],
+      isLoading: false,
+      isError: false,
+      error: null,
+    });
+    mockRunWorkflow.mockImplementation(async () => {
+      throw new Error("upstream 502");
+    });
+    const errorSpy = vi
+      .spyOn(notification, "error")
+      .mockImplementation(() => undefined);
+
+    renderAt();
+    const submitBtn = screen.getByRole("button", { name: /提\s?交/ });
+    fireEvent.click(submitBtn);
+
+    await waitFor(() => {
+      expect(errorSpy).toHaveBeenCalledTimes(1);
+    });
+    // submitting must settle even on the rejection path (finally branch).
+    await waitFor(() => {
+      expect(submitBtn.className).not.toContain("ant-btn-loading");
+    });
   });
 });
