@@ -19,7 +19,7 @@
 
 import { useState } from "react";
 import { useParams } from "react-router-dom";
-import { Card, Layout, Tabs } from "antd";
+import { Card, Layout, Tabs, notification } from "antd";
 import { DynamicInputForm } from "@/components/workflow/DynamicInputForm";
 import { NodeTraceViewer } from "@/components/workflow/NodeTraceViewer";
 import { RunHistoryList } from "@/components/workflow/RunHistoryList";
@@ -30,19 +30,40 @@ export function WorkflowRunPage() {
   const { appId } = useParams<{ appId: string }>();
   const [nodeTrace, setNodeTrace] = useState<NcmuSseEvent[]>([]);
   const [output, setOutput] = useState<Record<string, unknown>>({});
+  // REWORK-77-INDEP I-INDEP-3: `submitting` is forwarded to DynamicInputForm so
+  // the 提交 button toggles antd's loading state — without this, a long-running
+  // workflow lets the user click 提交 again, which races setNodeTrace([]) and
+  // wipes the in-flight trace. Parity with CompletionPage submitting wiring.
+  const [submitting, setSubmitting] = useState(false);
   const { data: parameters } = useAppParameters(appId!);
 
+  // REWORK-77-INDEP I-INDEP-2: runWorkflow may throw (network error / SSE
+  // parse failure / backend 5xx). Without try/catch the rejection becomes an
+  // unhandled promise + the user-visible state stays half-reset (nodeTrace and
+  // output were cleared at the top but never repopulated). Wrap so the user
+  // sees a notification and the submitting flag releases regardless.
   const handleSubmit = async (values: Record<string, unknown>) => {
+    setSubmitting(true);
     setNodeTrace([]);
     setOutput({});
-    await runWorkflow(appId!, values, (evt) => {
-      if (typeof evt === "string") return; // completion-mode chunks ignored
-      setNodeTrace((prev) => [...prev, evt]);
-      if (evt.event_type === "workflow_finished") {
-        const outs = (evt.data as { outputs?: Record<string, unknown> }).outputs;
-        setOutput(outs ?? {});
-      }
-    });
+    try {
+      await runWorkflow(appId!, values, (evt) => {
+        if (typeof evt === "string") return; // completion-mode chunks ignored
+        setNodeTrace((prev) => [...prev, evt]);
+        if (evt.event_type === "workflow_finished") {
+          const outs = (evt.data as { outputs?: Record<string, unknown> })
+            .outputs;
+          setOutput(outs ?? {});
+        }
+      });
+    } catch (err) {
+      notification.error({
+        message: "执行失败",
+        description: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   return (
@@ -59,6 +80,7 @@ export function WorkflowRunPage() {
                     <DynamicInputForm
                       parameters={parameters ?? []}
                       onSubmit={handleSubmit}
+                      submitting={submitting}
                     />
                   </Card>
                   <Card title="节点流" style={{ marginBottom: 16 }}>
