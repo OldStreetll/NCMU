@@ -8,6 +8,8 @@ import { RequireAuth } from "@/components/RequireAuth";
 const ChatPage = lazy(() => import("@/pages/ChatPage"));
 // M-NEW-1 / C-NEW-4: AdminKbConfigsPage stub created by TASK-29; TASK-32 overwrites.
 const AdminKbConfigsPage = lazy(() => import("@/pages/AdminKbConfigsPage"));
+// TASK-75 (Phase 2B B3): advanced-chat (Chatflow) mode page.
+const AdvancedChatPage = lazy(() => import("@/pages/AdvancedChatPage"));
 
 const lazyFallback = (
   <div style={{ display: "flex", justifyContent: "center", padding: 48 }}>
@@ -46,6 +48,16 @@ export function AppRoutes() {
           <Suspense fallback={lazyFallback}>
             <AdminKbConfigsPage />
           </Suspense>
+        }
+      />
+      <Route
+        path="/apps/:appId/chatflow"
+        element={
+          <RequireAuth>
+            <Suspense fallback={lazyFallback}>
+              <AdvancedChatPage />
+            </Suspense>
+          </RequireAuth>
         }
       />
       <Route path="*" element={<Navigate to="/" replace />} />
