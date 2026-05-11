@@ -10,6 +10,8 @@ const ChatPage = lazy(() => import("@/pages/ChatPage"));
 const AdminKbConfigsPage = lazy(() => import("@/pages/AdminKbConfigsPage"));
 // TASK-75 (Phase 2B B3): advanced-chat (Chatflow) mode page.
 const AdvancedChatPage = lazy(() => import("@/pages/AdvancedChatPage"));
+// TASK-76 (Phase 2B B3): completion-mode page.
+const CompletionPage = lazy(() => import("@/pages/CompletionPage"));
 
 const lazyFallback = (
   <div style={{ display: "flex", justifyContent: "center", padding: 48 }}>
@@ -56,6 +58,16 @@ export function AppRoutes() {
           <RequireAuth>
             <Suspense fallback={lazyFallback}>
               <AdvancedChatPage />
+            </Suspense>
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/apps/:appId/completion"
+        element={
+          <RequireAuth>
+            <Suspense fallback={lazyFallback}>
+              <CompletionPage />
             </Suspense>
           </RequireAuth>
         }
