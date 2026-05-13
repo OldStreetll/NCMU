@@ -30,7 +30,44 @@ export function CompletionPage() {
     setSubmitting(true);
     setOutput("");
     try {
-      await runWorkflow(appId!, values, (chunk) => {
+      // TASK-81 (B-NEW-26b): Completion mode requires DOUBLE-fill of the
+      // `query` field per TASK-79 fixtures.json字面 (commit c320cd9, 5/5 PASS):
+      //   body = { inputs: { inputs: <form_vars>, query: <text> } }
+      //                              ^^^^^^^^^^^^^^^^^^^^^^^^^^
+      //                              both filled with the user's text — form
+      //                              vars retains the `query` key (Dify
+      //                              prompt template references {{query}}
+      //                              via inputs.*) AND backend body.query is
+      //                              explicitly set per completion.py:45.
+      // Pull `query` off form values (if the App schema includes a
+      // `variable: "query"` field) and lift it to the outer slot;
+      // body.inputs.inputs keeps the full values dict so the inner copy
+      // remains for template resolution — exact字面 mirror of fixtures.json
+      // completion shape `{inputs: {inputs: {query: "..."}, query: "..."}}`.
+      //
+      // ★ App schema assumption (REWORK-81-NIT C1): the bound Dify Completion
+      // App's parameter schema MUST include a `variable: "query"` field of
+      // type text/paragraph — without it `maybeQuery` is undefined,
+      // `outerQuery` falls back to "" and backend `completion.py:45`
+      // forwards `body.query = ""` to Dify Completion API, which may 400 the
+      // request (Dify expects a non-empty user message). NCMU [KB]-style
+      // naming convention places this responsibility on the App author; the
+      // SPA does not synthesize a query from arbitrary form fields.
+      //
+      // ★ 双填根因 (REWORK-81-NIT C3): Dify Completion App simultaneously
+      // consumes `query` at two distinct call sites — (1) prompt template
+      // interpolation `{{query}}` resolves from `inputs.<var>` so the value
+      // must appear inside `body.inputs.*`; (2) Dify Completion REST API
+      // body.query is the user message ushered into chat-history /
+      // run-context. The two sinks read from independent slots — leaving
+      // either blank silently degrades a different facet of the run
+      // (template renders an empty placeholder vs context shows no user
+      // turn). Hence the SPA double-fills: form values land in
+      // `body.inputs.inputs` verbatim (template) AND the same string is
+      // promoted to `body.inputs.query` (API body).
+      const maybeQuery = (values as Record<string, unknown>).query;
+      const outerQuery = typeof maybeQuery === "string" ? maybeQuery : "";
+      await runWorkflow(appId!, { inputs: values, query: outerQuery }, (chunk) => {
         if (typeof chunk === "string") {
           // Reserved for a future per-token streaming mode; current
           // backend completion orchestrator does not emit string chunks.

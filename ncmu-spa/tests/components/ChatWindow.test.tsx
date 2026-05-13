@@ -383,7 +383,14 @@ describe("ChatWindow", () => {
     expect(matches.length).toBe(1);
   });
 
-  it("TASK-70a (e) body shape: workflow override = {inputs:{...}}, default = flat {query, conversation_id}", async () => {
+  it("TASK-70a (e) body shape: workflow override = 3-layer {inputs:{inputs:{},query,conversation_id}}, default = flat {query, conversation_id}", async () => {
+    // TASK-81 (B-NEW-26b): workflow path body now nests TWO `inputs` keys
+    // per backend orchestrator contracts (advanced_chat.py:58-64 +
+    // agent_chat.py:50-56 read `inputs.get("inputs", {})` + `inputs.get("query", "")`
+    // + `inputs.get("conversation_id", "")` off the pydantic-stripped outer
+    // dict). Pre-fix this assertion was one layer short and would have
+    // green-lit production payloads that Dify upstream 400'd. Mirrors
+    // fixtures.json advanced-chat字面 `{inputs: {inputs: {}, query: "..."}}`.
     let lastBody: Record<string, unknown> | null = null;
     const fetchSpy = vi.fn(async (_url: string | URL, init?: RequestInit) => {
       lastBody = JSON.parse(String(init?.body ?? "null")) as Record<
@@ -412,7 +419,7 @@ describe("ChatWindow", () => {
     await typeAndSubmit("q1");
     await waitFor(() => expect(lastBody).not.toBeNull());
     expect(lastBody).toEqual({
-      inputs: { query: "q1", conversation_id: "" },
+      inputs: { inputs: {}, query: "q1", conversation_id: "" },
     });
     unmount();
     lastBody = null;

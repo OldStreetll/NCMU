@@ -5,6 +5,12 @@
 # Never tracked. Companion `.env.bootstrap.example` is committed as a
 # template (no real secrets).
 .env.bootstrap
+# Ad-hoc .env backup snapshots taken during destructive ops (eg.
+# TASK-79b token-sync regression). REWORK-81-NIT INDEP-4: previous
+# practice of leaving `.env.bak-YYYY-MM-DD-...` files untracked
+# tempted `git add -A` accidents; cover the pattern explicitly so a
+# future bulk-add cannot pick them up.
+.env.bak-*
 *.pyc
 __pycache__/
 .venv/

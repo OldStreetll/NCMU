@@ -69,9 +69,10 @@ export interface ChatWindowProps {
   // the full path "/api/v1/ncmu/workflow/apps/X/run" will yield a
   // double-prefix 404 (F-FRESH-2). When this prop is set, ChatWindow
   // additionally:
-  //   (1) switches the request body to the workflow shape
-  //       `{inputs: {query, conversation_id}}` (backend
-  //       WorkflowRunRequest schema);
+  //   (1) switches the request body to the workflow 3-layer shape
+  //       `{inputs: {inputs: {}, query, conversation_id}}` per backend
+  //       advanced_chat.py:58-64 / agent_chat.py:50-56 — see buildBody
+  //       comment below (TASK-81 / B-NEW-26b);
   //   (2) injects `workflow_finished` event's inner `data.outputs.answer`
   //       into the assistant bubble — see PLAN-FIX-4 H-FRESH-3 below.
   streamEndpointOverride?: string;
@@ -121,12 +122,30 @@ function flattenDifyMessages(rows: DifyMessageRow[]): ChatMessage[] {
   return flat;
 }
 
-// TASK-70a body adapter. Workflow endpoint expects `{inputs: {...}}` per
-// backend WorkflowRunRequest schema; chat endpoint expects flat
-// `{query, conversation_id}` per Phase 1 contract. `useWorkflowShape` keys
-// off whether `streamEndpointOverride` is set (chat path = undefined).
-// `conversationId ?? ""` for workflow shape because WorkflowRunRequest's
-// `conversation_id` is a Pydantic str field (no `Optional[]`).
+// TASK-70a body adapter; TASK-81 (B-NEW-26b) lifts the workflow branch to
+// the real 3-layer wire shape.
+//
+// Chat endpoint expects flat `{query, conversation_id}` per Phase 1
+// contract — unchanged here.
+//
+// Workflow endpoint expects 3 layers per backend orchestrator contracts
+// (advanced_chat.py:58-64 + agent_chat.py:50-56 — the two orchestrators
+// ChatWindow override traffic actually targets):
+//   body = { inputs: { inputs: <form_vars>, query: <text>, conversation_id: <conv> } }
+//          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+//          POST root    Pydantic-stripped         backend orchestrator
+//                       outer dict                inner reads
+// `<form_vars>` defaults to `{}` here because ChatWindow has no DynamicInputForm
+// concept — AdvancedChatPage / AgentChatPage today do not collect form vars
+// (the chat-style turn provides only `query` text). Adding a form-vars prop
+// is out of scope for TASK-81 (B-NEW-26b); pre-fix the buildBody output
+// was `{ inputs: { query, conversation_id } }` (one layer short) which
+// caused backend `inputs.get("inputs", {})` to return `{}` AND
+// `inputs.get("query", "")` to return `""` — Dify upstream saw empty
+// vars + empty query and 400/stalled.
+//
+// `conversationId ?? ""` because the orchestrator default is `""` not null
+// and the backend reads `inputs.get("conversation_id", "")`.
 //
 // TASK-FIX-50: param renamed `sessionId` → `conversationId` to reflect the
 // post-bug-fix semantics — the value here is `activeConvRef.current` which
@@ -137,7 +156,13 @@ function buildBody(
   useWorkflowShape: boolean,
 ): Record<string, unknown> {
   if (useWorkflowShape) {
-    return { inputs: { query: text, conversation_id: conversationId ?? "" } };
+    return {
+      inputs: {
+        inputs: {},
+        query: text,
+        conversation_id: conversationId ?? "",
+      },
+    };
   }
   return { query: text, conversation_id: conversationId };
 }

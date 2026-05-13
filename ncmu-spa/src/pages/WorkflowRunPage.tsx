@@ -47,7 +47,12 @@ export function WorkflowRunPage() {
     setNodeTrace([]);
     setOutput({});
     try {
-      await runWorkflow(appId!, values, (evt) => {
+      // TASK-81 (B-NEW-26b): pass form values via the `inputs` slot of
+      // RunWorkflowInputs — runWorkflow then serializes the 3-layer wire
+      // body `{ inputs: { inputs: values } }`. workflow.py:51-55 reads
+      // only `inputs.get("inputs", {})` and ignores query/conversation_id,
+      // so neither field is set here.
+      await runWorkflow(appId!, { inputs: values }, (evt) => {
         if (typeof evt === "string") return; // completion-mode chunks ignored
         setNodeTrace((prev) => [...prev, evt]);
         if (evt.event_type === "workflow_finished") {

@@ -64,7 +64,24 @@ export { BASE as API_BASE };
 //
 // runWorkflow: thin async wrapper over `streamChat` that drives the workflow
 // SSE endpoint `/workflow/apps/{appId}/run` (relative to API_BASE — F-FRESH-2
-// double-prefix trap). The callback receives one of two shapes per frame:
+// double-prefix trap).
+//
+// ★ TASK-81 (B-NEW-26b) — 3-layer wire shape: the POST body MUST be
+//   `{ inputs: { inputs: <form_vars>, query?: <text>, conversation_id?: <conv> } }`
+//   per backend orchestrator contracts (commit c320cd9):
+//     - completion.py:43-48      reads inputs.get("inputs", {}) + inputs.get("query", "")
+//     - workflow.py:51-55        reads inputs.get("inputs", {}) (no query / no conv)
+//     - advanced_chat.py:58-64   reads all 3 inner fields
+//     - agent_chat.py:50-56      reads all 3 inner fields
+//   Pydantic `WorkflowRunRequest.inputs: dict[str, Any]` strips one layer at
+//   the endpoint boundary, so the orchestrator's local `inputs` is the
+//   INNER dict — meaning the wire body needs two `inputs` keys nested.
+//   Pre-fix the SPA shipped `{ inputs: <form_values> }` (one layer short),
+//   so backend `inputs.get("inputs", {})` returned `{}` and `inputs.get("query", "")`
+//   returned "" → upstream Dify saw empty form vars + empty query and would
+//   400 or stall (B-NEW-26b production bug).
+//
+// The callback receives one of two shapes per frame:
 //   - string         : reserved for a future per-token streaming mode. No
 //                      current backend orchestrator emits this on the
 //                      workflow endpoint — completion.py / advanced_chat.py /
@@ -123,15 +140,37 @@ export function useAppParameters(appId: string): QueryResult<ParameterSchema[]> 
 
 export type WorkflowChunk = string | NcmuSseEvent;
 
+// TASK-81 (B-NEW-26b): explicit inner-layer fields the backend orchestrators
+// read off Pydantic's stripped `inputs` dict. All optional — only `inputs`
+// (form vars) is universal across the 4 modes; `query` is required by
+// completion / advanced-chat / agent-chat but ignored by workflow; and
+// `conversation_id` is required by advanced-chat / agent-chat only. Callers
+// pass whichever fields apply to their target mode; runWorkflow serializes
+// only the fields explicitly set so untouched modes don't see junk keys.
+export interface RunWorkflowInputs {
+  inputs?: Record<string, unknown>;
+  query?: string;
+  conversation_id?: string;
+}
+
 export async function runWorkflow(
   appId: string,
-  inputs: Record<string, unknown>,
+  inputs: RunWorkflowInputs,
   onChunk: (chunk: WorkflowChunk) => void,
   signal?: AbortSignal,
 ): Promise<void> {
+  // TASK-81 (B-NEW-26b): construct the inner pydantic dict explicitly so
+  // the POST body is `{ inputs: { inputs, query?, conversation_id? } }` —
+  // the 3-layer wire shape backend orchestrators actually consume. See the
+  // module-top comment for the per-mode field map.
+  const inner: Record<string, unknown> = { inputs: inputs.inputs ?? {} };
+  if (inputs.query !== undefined) inner.query = inputs.query;
+  if (inputs.conversation_id !== undefined) {
+    inner.conversation_id = inputs.conversation_id;
+  }
   for await (const evt of streamChat(
     appId,
-    { inputs },
+    { inputs: inner },
     signal,
     `/workflow/apps/${appId}/run`,
   )) {
