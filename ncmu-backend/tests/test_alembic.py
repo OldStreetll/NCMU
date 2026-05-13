@@ -48,11 +48,27 @@ def test_upgrade_head_creates_all_expected_tables(db_session):
         f"预期表 {EXPECTED_TABLES} 未全部创建；实际：{sorted(rows)}"
     )
 
-    # 再断言 alembic_version 有 0005（最新 head — Phase 2B TASK-67b 加 workflow_runs + dify_apps.mode）
+    # 再断言 alembic_version 有 0006（最新 head — TASK-79-BACKEND-ARCH-FIX
+    # 加 dify_apps.api_token；0005 是 Phase 2B TASK-67b workflow_runs + dify_apps.mode）
     version = db_session.execute(
         text("SELECT version_num FROM alembic_version")
     ).scalar_one()
-    assert version == "0005", f"预期 alembic_version=0005，实际 {version}"
+    assert version == "0006", f"预期 alembic_version=0006，实际 {version}"
+
+    # IMP-INDEP-4: 显式列级断言 — 0006 migration 的核心交付物是
+    # dify_apps.api_token VARCHAR(64) NULL。版本号匹配不保证列真被加
+    # （脚本可能没跑完 / 列名 typo / migration 走错分支等），用
+    # information_schema.columns 字面对账列存在。typo 类 bug（如 api_tokens
+    # 复数 / api-token 横线）此断言即捕获。
+    columns = db_session.execute(
+        text(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_schema='public' AND table_name='dify_apps'"
+        )
+    ).scalars().all()
+    assert "api_token" in set(columns), (
+        f"预期 dify_apps.api_token 列存在 (0006 migration)，实际列：{sorted(columns)}"
+    )
 
 
 def test_downgrade_base_drops_all_business_tables(test_db_url):

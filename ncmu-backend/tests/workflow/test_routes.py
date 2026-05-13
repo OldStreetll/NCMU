@@ -182,6 +182,7 @@ class _CancellingOrchestrator(BaseOrchestrator):
 
     async def run(
         self,
+        dify_client: DifyStreamClient,  # ARCH-FIX-79: dispatcher injects per-call
         run_id: uuid.UUID,
         app_id: str,
         user_id: uuid.UUID,

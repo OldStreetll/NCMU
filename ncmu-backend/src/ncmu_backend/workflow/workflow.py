@@ -32,6 +32,7 @@ from ncmu_backend.schemas.sse_events import (
     WorkflowFinishedData,
 )
 from ncmu_backend.workflow._base import BaseOrchestrator
+from ncmu_backend.workflow.dify_client import DifyStreamClient
 
 
 class WorkflowOrchestrator(BaseOrchestrator):
@@ -41,6 +42,7 @@ class WorkflowOrchestrator(BaseOrchestrator):
 
     async def run(
         self,
+        dify_client: DifyStreamClient,
         run_id: uuid.UUID,
         app_id: str,
         user_id: uuid.UUID,
@@ -51,7 +53,7 @@ class WorkflowOrchestrator(BaseOrchestrator):
             "user": str(user_id),
             "response_mode": "streaming",
         }
-        async for raw in self._dify.stream("/v1/workflows/run", body):
+        async for raw in dify_client.stream("/v1/workflows/run", body):
             event_name = raw.get("event")
             now = datetime.now(timezone.utc)
             data = raw.get("data", {})
@@ -65,7 +67,10 @@ class WorkflowOrchestrator(BaseOrchestrator):
                         node_id=data.get("node_id", ""),
                         node_type=data.get("node_type", ""),
                         title=data.get("title"),
-                        inputs=data.get("inputs", {}),
+                        # REWORK-79-BACKEND-SCHEMA-FIX-2: see
+                        # advanced_chat.py for the inputs=null background;
+                        # Dify ``/v1/workflows/run`` emits the same shape.
+                        inputs=data.get("inputs") or {},
                     ),
                 )
             elif event_name == "node_finished":
@@ -77,7 +82,10 @@ class WorkflowOrchestrator(BaseOrchestrator):
                         node_id=data.get("node_id", ""),
                         node_type=data.get("node_type", ""),
                         status=data.get("status", "succeeded"),
-                        outputs=data.get("outputs", {}),
+                        # REWORK-79-BACKEND-SCHEMA-FIX-3: see advanced_chat.py
+                        # for the outputs=null background; Dify
+                        # ``/v1/workflows/run`` emits the same shape.
+                        outputs=data.get("outputs") or {},
                         elapsed_ms=data.get("elapsed_time"),
                         error=data.get("error"),
                     ),
@@ -89,7 +97,10 @@ class WorkflowOrchestrator(BaseOrchestrator):
                     timestamp=now,
                     data=WorkflowFinishedData(
                         status=data.get("status", "succeeded"),
-                        outputs=data.get("outputs", {}),
+                        # REWORK-79-BACKEND-SCHEMA-FIX-3: see advanced_chat.py
+                        # for the outputs=null background; Dify
+                        # ``/v1/workflows/run`` emits the same shape.
+                        outputs=data.get("outputs") or {},
                         total_elapsed_ms=data.get("elapsed_time"),
                         error=data.get("error"),
                     ),

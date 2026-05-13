@@ -37,6 +37,24 @@ class DifyStreamClient:
         self._key = api_key
         self._timeout = timeout
 
+    @property
+    def base_url(self) -> str:
+        """Stripped base URL — read-only so ModeDispatcher's per-App client
+        cache (workflow/mode_dispatcher.py) can spawn sibling clients that
+        share the upstream Dify endpoint while varying only the api_key."""
+        return self._base
+
+    @property
+    def api_key(self) -> str:
+        """Bearer token used in upstream Authorization header. Public so
+        ModeDispatcher.resolve_token can return this as the "fallback to
+        default" value when dify_apps.api_token is NULL."""
+        return self._key
+
+    @property
+    def timeout(self) -> float:
+        return self._timeout
+
     async def stream(
         self,
         path: str,

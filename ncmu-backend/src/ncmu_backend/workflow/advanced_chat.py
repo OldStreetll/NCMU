@@ -39,6 +39,7 @@ from ncmu_backend.schemas.sse_events import (
     WorkflowFinishedData,
 )
 from ncmu_backend.workflow._base import BaseOrchestrator
+from ncmu_backend.workflow.dify_client import DifyStreamClient
 
 
 class AdvancedChatOrchestrator(BaseOrchestrator):
@@ -48,6 +49,7 @@ class AdvancedChatOrchestrator(BaseOrchestrator):
 
     async def run(
         self,
+        dify_client: DifyStreamClient,
         run_id: uuid.UUID,
         app_id: str,
         user_id: uuid.UUID,
@@ -61,7 +63,7 @@ class AdvancedChatOrchestrator(BaseOrchestrator):
             "conversation_id": inputs.get("conversation_id", ""),
         }
         accumulated_answer = ""  # F-NEW-1: see module docstring
-        async for raw in self._dify.stream("/v1/chat-messages", body):
+        async for raw in dify_client.stream("/v1/chat-messages", body):
             event_name = raw.get("event")
             now = datetime.now(timezone.utc)
             data = raw.get("data", {})  # H2: every Dify field is data-nested
@@ -74,7 +76,15 @@ class AdvancedChatOrchestrator(BaseOrchestrator):
                         node_id=data.get("node_id", ""),
                         node_type=data.get("node_type", ""),
                         title=data.get("title"),
-                        inputs=data.get("inputs", {}),
+                        # REWORK-79-BACKEND-SCHEMA-FIX-2: Dify v1.13.3 emits
+                        # ``inputs: null`` when a node has no inputs (per
+                        # task_entities.py:346 NodeStartedStreamResponse).
+                        # ``.get(...,{})`` only catches MISSING key; for
+                        # an explicit-null value it still returns ``None``.
+                        # ``or {}`` defends at the boundary; schema's
+                        # field_validator(mode="before") is the redundant
+                        # safety net.
+                        inputs=data.get("inputs") or {},
                     ),
                 )
             elif event_name == "node_finished":
@@ -86,7 +96,12 @@ class AdvancedChatOrchestrator(BaseOrchestrator):
                         node_id=data.get("node_id", ""),
                         node_type=data.get("node_type", ""),
                         status=data.get("status", "succeeded"),
-                        outputs=data.get("outputs", {}),
+                        # REWORK-79-BACKEND-SCHEMA-FIX-3: Dify v1.13.3 emits
+                        # ``outputs: null`` for nodes that produce no output
+                        # (task_entities.py:399 NodeFinishStreamResponse).
+                        # ``.get(..., {})`` only catches MISSING key; explicit
+                        # null still returns ``None`` → schema would reject.
+                        outputs=data.get("outputs") or {},
                         elapsed_ms=data.get("elapsed_time"),
                         error=data.get("error"),
                     ),

@@ -31,6 +31,7 @@ from ncmu_backend.schemas.sse_events import (
     WorkflowFinishedData,
 )
 from ncmu_backend.workflow._base import BaseOrchestrator
+from ncmu_backend.workflow.dify_client import DifyStreamClient
 
 
 class AgentChatOrchestrator(BaseOrchestrator):
@@ -40,6 +41,7 @@ class AgentChatOrchestrator(BaseOrchestrator):
 
     async def run(
         self,
+        dify_client: DifyStreamClient,
         run_id: uuid.UUID,
         app_id: str,
         user_id: uuid.UUID,
@@ -53,7 +55,7 @@ class AgentChatOrchestrator(BaseOrchestrator):
             "conversation_id": inputs.get("conversation_id", ""),
         }
         accumulated_text = ""
-        async for raw in self._dify.stream("/v1/chat-messages", body):
+        async for raw in dify_client.stream("/v1/chat-messages", body):
             event_name = raw.get("event")
             now = datetime.now(timezone.utc)
             if event_name == "agent_thought":

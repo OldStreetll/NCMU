@@ -8,6 +8,13 @@ mode through a single code path.
 `run` is declared as an `AsyncIterator[NcmuSseEvent]` — yielding one
 NCMU envelope per upstream Dify event. `routes.py` is responsible for
 serialising those into the wire-level SSE frames the SPA consumes.
+
+TASK-79-BACKEND-ARCH-FIX (2026-05-12): `run` accepts the per-App
+``dify_client`` as its first argument. Dify v1.13.3 binds each API
+token to one App; ModeDispatcher (workflow/mode_dispatcher.py) looks up
+`dify_apps.api_token` at dispatch time and hands the matching cached
+DifyStreamClient to the orchestrator. Orchestrators no longer hold a
+client of their own — they are pure event-mapping pipelines.
 """
 from __future__ import annotations
 
@@ -24,12 +31,10 @@ class BaseOrchestrator(abc.ABC):
 
     mode: str  # subclass overrides — used by mode_dispatcher (TASK-69)
 
-    def __init__(self, dify_client: DifyStreamClient):
-        self._dify = dify_client
-
     @abc.abstractmethod
     async def run(
         self,
+        dify_client: DifyStreamClient,
         run_id: uuid.UUID,
         app_id: str,
         user_id: uuid.UUID,
@@ -39,7 +44,10 @@ class BaseOrchestrator(abc.ABC):
 
         Subclasses decide how to translate the Dify upstream event stream
         into NCMU envelopes (status mapping per H2, fields per the
-        relevant `*Data` schema).
+        relevant `*Data` schema). ``dify_client`` is the per-App client
+        chosen by ModeDispatcher.resolve_token + get_client; orchestrators
+        must use it (not a stored attribute) so each request hits the
+        correct Dify App.
         """
         raise NotImplementedError
         yield  # pragma: no cover — keeps this an async generator

@@ -117,11 +117,18 @@ def _patch_httpx(monkeypatch):
 
 
 def _make_orchestrator():
+    """ARCH-FIX-79: orchestrator no longer holds its own DifyStreamClient
+    (per-App client is injected via .run()'s first arg). Tests construct
+    the client separately via _make_client() and pass to .run()."""
     from ncmu_backend.workflow.advanced_chat import AdvancedChatOrchestrator
+
+    return AdvancedChatOrchestrator()
+
+
+def _make_client():
     from ncmu_backend.workflow.dify_client import DifyStreamClient
 
-    dsc = DifyStreamClient(base_url="http://dify-api:5001", api_key="k")
-    return AdvancedChatOrchestrator(dsc)
+    return DifyStreamClient(base_url="http://dify-api:5001", api_key="k")
 
 
 def _run_inputs():
@@ -133,6 +140,19 @@ def _run_inputs():
     )
 
 
+def _fake_db_null_token():
+    """AsyncMock db whose execute().first() returns (None,) — so
+    ModeDispatcher.resolve_token falls back to the default client's token
+    (ARCH-FIX-79 backward-compat path for tests that don't seed dify_apps)."""
+    from unittest.mock import AsyncMock, MagicMock
+    fake_db = AsyncMock()
+    fake_result = MagicMock()
+    fake_result.first = MagicMock(return_value=(None,))
+    fake_db.execute = AsyncMock(return_value=fake_result)
+    return fake_db
+
+
+
 # --------------------------------------------------------------------- #
 # (a) AC#3(a) — yields exactly 5 NCMU events
 # --------------------------------------------------------------------- #
@@ -140,7 +160,7 @@ async def test_yields_five_events_from_seven_row_fixture():
     _FakeAsyncClient.LINES = _load_fixture_lines()
     orch = _make_orchestrator()
     run_id, app_id, user_id, inputs = _run_inputs()
-    events = [ev async for ev in orch.run(run_id, app_id, user_id, inputs)]
+    events = [ev async for ev in orch.run(_make_client(), run_id, app_id, user_id, inputs)]
     assert len(events) == 5, (
         f"expected 5 NCMU events (2 node_started + 2 node_finished + 1 "
         f"workflow_finished); message + message_end must be accumulated "
@@ -155,7 +175,7 @@ async def test_yield_sequence_matches_fixture_order():
     _FakeAsyncClient.LINES = _load_fixture_lines()
     orch = _make_orchestrator()
     run_id, app_id, user_id, inputs = _run_inputs()
-    types = [ev.event_type async for ev in orch.run(run_id, app_id, user_id, inputs)]
+    types = [ev.event_type async for ev in orch.run(_make_client(), run_id, app_id, user_id, inputs)]
     assert types == [
         "node_started",
         "node_finished",
@@ -174,7 +194,7 @@ async def test_node_started_fields_map_from_data_nest():
     _FakeAsyncClient.LINES = _load_fixture_lines()
     orch = _make_orchestrator()
     run_id, app_id, user_id, inputs = _run_inputs()
-    events = [ev async for ev in orch.run(run_id, app_id, user_id, inputs)]
+    events = [ev async for ev in orch.run(_make_client(), run_id, app_id, user_id, inputs)]
     first_started = events[0]
     assert first_started.event_type == "node_started"
     assert isinstance(first_started.data, NodeStartedData)
@@ -201,7 +221,7 @@ async def test_workflow_finished_merges_accumulated_answer():
     _FakeAsyncClient.LINES = _load_fixture_lines()
     orch = _make_orchestrator()
     run_id, app_id, user_id, inputs = _run_inputs()
-    events = [ev async for ev in orch.run(run_id, app_id, user_id, inputs)]
+    events = [ev async for ev in orch.run(_make_client(), run_id, app_id, user_id, inputs)]
     final = events[-1]
     assert final.event_type == "workflow_finished"
     assert isinstance(final.data, WorkflowFinishedData)
@@ -226,7 +246,7 @@ async def test_unknown_event_name_is_skipped():
     orch = _make_orchestrator()
     run_id, app_id, user_id, inputs = _run_inputs()
     # Should still be exactly 5 mapped events; the 2 unknowns drop on the floor.
-    events = [ev async for ev in orch.run(run_id, app_id, user_id, inputs)]
+    events = [ev async for ev in orch.run(_make_client(), run_id, app_id, user_id, inputs)]
     assert len(events) == 5
     assert all(
         ev.event_type
@@ -244,7 +264,7 @@ async def test_no_message_rows_means_no_answer_key():
     )
     orch = _make_orchestrator()
     run_id, app_id, user_id, inputs = _run_inputs()
-    events = [ev async for ev in orch.run(run_id, app_id, user_id, inputs)]
+    events = [ev async for ev in orch.run(_make_client(), run_id, app_id, user_id, inputs)]
     final = events[-1]
     assert final.event_type == "workflow_finished"
     # accumulated_answer stayed "" so the `if accumulated_answer` guard
@@ -266,12 +286,11 @@ async def test_dispatcher_registers_and_dispatches_advanced_chat():
     _FakeAsyncClient.LINES = _load_fixture_lines()
     dsc = DifyStreamClient(base_url="http://dify-api:5001", api_key="k")
     dispatcher = ModeDispatcher(dsc)
-    dispatcher.register("advanced-chat", AdvancedChatOrchestrator(dsc))
+    dispatcher.register("advanced-chat", AdvancedChatOrchestrator())
 
     run_id, app_id, user_id, inputs = _run_inputs()
     events = [
-        ev async for ev in dispatcher.dispatch(
-            "advanced-chat", run_id, app_id, user_id, inputs
+        ev async for ev in dispatcher.dispatch(_fake_db_null_token(), "advanced-chat", run_id, app_id, user_id, inputs
         )
     ]
     assert len(events) >= 5, (

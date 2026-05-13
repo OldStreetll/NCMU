@@ -71,11 +71,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         timeout=httpx.Timeout(60.0, connect=5.0)
     )
 
-    # TASK-69 (Phase 2B B1): workflow dispatcher 单例（空 registry；B2 4 task
-    # 后续 register 4 mode）。Note: TASK-68 DifyStreamClient takes
-    # (base_url, api_key) — plan 字面 ``DifyStreamClient(app.state.dify_client)``
-    # is a typo, NIT-INDEP68-2 已挂 TASK-71 sweep；dispatcher 仅 hold 引用，
-    # dispatch 不调 self._dify，B2 task 时按需重构。
+    # TASK-69 (Phase 2B B1) + TASK-79-BACKEND-ARCH-FIX (2026-05-12):
+    # workflow dispatcher 单例。Dispatcher's constructor takes a default
+    # DifyStreamClient — its base_url + api_key + timeout become the
+    # defaults for the per-App client cache (workflow/mode_dispatcher.py).
+    # The default token (chat App's [KB]员工手册 token) is the fallback
+    # when dify_apps.api_token IS NULL, so any non-backfilled row still
+    # works against the chat App (same behaviour as pre-79).
     from ncmu_backend.workflow.dify_client import DifyStreamClient
     from ncmu_backend.workflow.mode_dispatcher import ModeDispatcher
     app.state.workflow_dispatcher = ModeDispatcher(
@@ -84,14 +86,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             api_key=settings.DIFY_APP_DEFAULT_TOKEN,
         )
     )
-    # B2 register 锚点（TASK-71/72/73/74 各追加 1 行 dispatcher.register）：
-    # NIT-INDEP68-2 sweep: orchestrators reuse the dispatcher's already-constructed
-    # DifyStreamClient (per dispatcher.py docstring: "stores the reference for B2
-    # orchestrators to consume"). Avoids spawning N redundant clients.
-    app.state.workflow_dispatcher.register("advanced-chat", AdvancedChatOrchestrator(app.state.workflow_dispatcher._dify))  # TASK-71
-    app.state.workflow_dispatcher.register("completion", CompletionOrchestrator(app.state.workflow_dispatcher._dify))  # TASK-72
-    app.state.workflow_dispatcher.register("workflow", WorkflowOrchestrator(app.state.workflow_dispatcher._dify))  # TASK-73
-    app.state.workflow_dispatcher.register("agent-chat", AgentChatOrchestrator(app.state.workflow_dispatcher._dify))  # TASK-74
+    # Orchestrators are now stateless event-mapping pipelines — the
+    # dispatcher injects the per-App DifyStreamClient via .run() at
+    # dispatch time (BaseOrchestrator.run's first arg). No client needed
+    # at construction.
+    app.state.workflow_dispatcher.register("advanced-chat", AdvancedChatOrchestrator())  # TASK-71
+    app.state.workflow_dispatcher.register("completion", CompletionOrchestrator())  # TASK-72
+    app.state.workflow_dispatcher.register("workflow", WorkflowOrchestrator())  # TASK-73
+    app.state.workflow_dispatcher.register("agent-chat", AgentChatOrchestrator())  # TASK-74
 
     # M7: boot-sweeper — 把上次 process crash / SSE 断连留下的 status='running'
     # 行兜底为 'timeout'。L-NEW-6 (PLAN-FIX-3): 阈值 15 min 与 spec §5.1 SSE

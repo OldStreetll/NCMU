@@ -99,21 +99,27 @@ def _fixture_as_sse_lines() -> list[str]:
     return [f"data: {line}" for line in raw if line.strip()]
 
 
-async def _run_orchestrator() -> list[NcmuSseEvent]:
-    """Drive AgentChatOrchestrator.run() against the fixture lines."""
-    from ncmu_backend.workflow.agent_chat import AgentChatOrchestrator
+def _make_client():
     from ncmu_backend.workflow.dify_client import DifyStreamClient
+    return DifyStreamClient(base_url="http://dify-api:5001", api_key="k")
+
+
+async def _run_orchestrator() -> list[NcmuSseEvent]:
+    """Drive AgentChatOrchestrator.run() against the fixture lines.
+
+    ARCH-FIX-79: orchestrator is stateless — the DifyStreamClient is now
+    passed to .run() as the first arg (dispatcher injection in production)."""
+    from ncmu_backend.workflow.agent_chat import AgentChatOrchestrator
 
     _FakeAsyncClient.LINES = _fixture_as_sse_lines()
-    orch = AgentChatOrchestrator(
-        DifyStreamClient(base_url="http://dify-api:5001", api_key="k")
-    )
+    orch = AgentChatOrchestrator()
     events: list[NcmuSseEvent] = []
     async for evt in orch.run(
-        run_id=uuid.uuid4(),
-        app_id="app-agent-test-1",
-        user_id=uuid.uuid4(),
-        inputs={"query": "search NCMU", "conversation_id": ""},
+        _make_client(),
+        uuid.uuid4(),
+        "app-agent-test-1",
+        uuid.uuid4(),
+        {"query": "search NCMU", "conversation_id": ""},
     ):
         events.append(evt)
     return events
@@ -122,6 +128,19 @@ async def _run_orchestrator() -> list[NcmuSseEvent]:
 @pytest.fixture
 async def events() -> list[NcmuSseEvent]:
     return await _run_orchestrator()
+
+
+def _fake_db_null_token():
+    """AsyncMock db whose execute().first() returns (None,) — so
+    ModeDispatcher.resolve_token falls back to the default client's token
+    (ARCH-FIX-79 backward-compat path for tests that don't seed dify_apps)."""
+    from unittest.mock import AsyncMock, MagicMock
+    fake_db = AsyncMock()
+    fake_result = MagicMock()
+    fake_result.first = MagicMock(return_value=(None,))
+    fake_db.execute = AsyncMock(return_value=fake_result)
+    return fake_db
+
 
 
 # --------------------------------------------------------------------- #
@@ -208,14 +227,14 @@ async def test_dispatcher_routes_agent_chat_mode():
 
     dify = DifyStreamClient(base_url="http://dify-api:5001", api_key="k")
     dispatcher = ModeDispatcher(dify)
-    dispatcher.register("agent-chat", AgentChatOrchestrator(dify))
+    dispatcher.register("agent-chat", AgentChatOrchestrator())
 
     _FakeAsyncClient.LINES = _fixture_as_sse_lines()
     run_id = uuid.uuid4()
     user_id = uuid.uuid4()
     types: list[str] = []
     async for evt in dispatcher.dispatch(
-        "agent-chat", run_id, "app-x", user_id, {"query": "q", "conversation_id": ""}
+        _fake_db_null_token(), "agent-chat", run_id, "app-x", user_id, {"query": "q", "conversation_id": ""}
     ):
         types.append(evt.event_type)
 

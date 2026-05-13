@@ -21,7 +21,7 @@ Cases (mapped to plan §B2 TASK-72 AC#3 a-f + AC#5):
   (f) AC#3(f) — text_chunk path standalone: 1 text_chunk + 1 message_end
       → accumulate hits ``data.text``, no exception.
   (g) AC#5 — ModeDispatcher.register("completion", orch) +
-      dispatcher.dispatch("completion", ...) → 1 workflow_finished event.
+      dispatcher.dispatch(_fake_db_null_token(), "completion", ...) → 1 workflow_finished event.
 """
 from __future__ import annotations
 
@@ -119,11 +119,31 @@ def _patch_httpx(monkeypatch):
 
 
 def _make_orchestrator():
+    """ARCH-FIX-79: orchestrator no longer holds its own DifyStreamClient
+    (dispatcher injects it via .run()'s first arg). Tests pass a client
+    via _make_client() into .run()."""
     from ncmu_backend.workflow.completion import CompletionOrchestrator
+
+    return CompletionOrchestrator()
+
+
+def _make_client():
     from ncmu_backend.workflow.dify_client import DifyStreamClient
 
-    client = DifyStreamClient(base_url="http://dify-api:5001", api_key="k")
-    return CompletionOrchestrator(client)
+    return DifyStreamClient(base_url="http://dify-api:5001", api_key="k")
+
+
+def _fake_db_null_token():
+    """AsyncMock db whose execute().first() returns (None,) — so
+    ModeDispatcher.resolve_token falls back to the default client's token
+    (ARCH-FIX-79 backward-compat path for tests that don't seed dify_apps)."""
+    from unittest.mock import AsyncMock, MagicMock
+    fake_db = AsyncMock()
+    fake_result = MagicMock()
+    fake_result.first = MagicMock(return_value=(None,))
+    fake_db.execute = AsyncMock(return_value=fake_result)
+    return fake_db
+
 
 
 # --------------------------------------------------------------------- #
@@ -133,8 +153,7 @@ async def test_completion_yields_single_workflow_finished_event():
     _FakeAsyncClient.LINES = _load_fixture_lines()
     orch = _make_orchestrator()
     out: list[NcmuSseEvent] = []
-    async for evt in orch.run(
-        run_id=uuid.uuid4(),
+    async for evt in orch.run(_make_client(), run_id=uuid.uuid4(),
         app_id="app-1",
         user_id=uuid.uuid4(),
         inputs={"query": "translate hello", "inputs": {}},
@@ -152,8 +171,7 @@ async def test_completion_accumulates_message_and_text_chunk():
     orch = _make_orchestrator()
     out = [
         evt
-        async for evt in orch.run(
-            uuid.uuid4(), "app-1", uuid.uuid4(), {"query": "x"}
+        async for evt in orch.run(_make_client(), uuid.uuid4(), "app-1", uuid.uuid4(), {"query": "x"}
         )
     ]
     assert isinstance(out[0].data, WorkflowFinishedData)
@@ -170,8 +188,7 @@ async def test_completion_total_elapsed_ms_from_metadata_usage_latency():
     orch = _make_orchestrator()
     out = [
         evt
-        async for evt in orch.run(
-            uuid.uuid4(), "app-1", uuid.uuid4(), {"query": "x"}
+        async for evt in orch.run(_make_client(), uuid.uuid4(), "app-1", uuid.uuid4(), {"query": "x"}
         )
     ]
     assert out[0].data.total_elapsed_ms == 1200
@@ -185,8 +202,7 @@ async def test_completion_status_is_succeeded():
     orch = _make_orchestrator()
     out = [
         evt
-        async for evt in orch.run(
-            uuid.uuid4(), "app-1", uuid.uuid4(), {"query": "x"}
+        async for evt in orch.run(_make_client(), uuid.uuid4(), "app-1", uuid.uuid4(), {"query": "x"}
         )
     ]
     assert out[0].data.status == "succeeded"
@@ -200,8 +216,7 @@ async def test_completion_uses_completion_messages_endpoint():
     orch = _make_orchestrator()
     _ = [
         evt
-        async for evt in orch.run(
-            uuid.uuid4(), "app-1", uuid.uuid4(), {"query": "x"}
+        async for evt in orch.run(_make_client(), uuid.uuid4(), "app-1", uuid.uuid4(), {"query": "x"}
         )
     ]
     assert _FakeAsyncClient.LAST_PATH is not None
@@ -222,8 +237,7 @@ async def test_completion_text_chunk_path_alone_accumulates():
     orch = _make_orchestrator()
     out = [
         evt
-        async for evt in orch.run(
-            uuid.uuid4(), "app-1", uuid.uuid4(), {"query": "x"}
+        async for evt in orch.run(_make_client(), uuid.uuid4(), "app-1", uuid.uuid4(), {"query": "x"}
         )
     ]
     assert len(out) == 1
@@ -248,8 +262,7 @@ async def test_dispatcher_dispatch_completion_yields_workflow_finished():
     run_id = uuid.uuid4()
     user_id = uuid.uuid4()
     out = []
-    async for evt in dispatcher.dispatch(
-        "completion", run_id, "app-x", user_id, {"query": "translate"}
+    async for evt in dispatcher.dispatch(_fake_db_null_token(), "completion", run_id, "app-x", user_id, {"query": "translate"}
     ):
         out.append(evt)
 

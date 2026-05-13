@@ -1,0 +1,32 @@
+[
+  {
+    "mode": "chat",
+    "app_id": "87d8d015-7515-4c85-b04c-52905d565549",
+    "inputs": {"query": "你好"},
+    "expected": {}
+  },
+  {
+    "mode": "advanced-chat",
+    "app_id": "56575c41-9c66-4248-80ef-86484f670f26",
+    "inputs": {"inputs": {"inputs": {}, "query": "reply ok"}},
+    "expected": {"node_started": 3, "node_finished": 3, "workflow_finished": 1}
+  },
+  {
+    "mode": "completion",
+    "app_id": "40f7c243-cd89-4074-9f78-8c3c777308d8",
+    "inputs": {"inputs": {"inputs": {"query": "Reply with one word"}, "query": "Reply with one word"}},
+    "expected": {"workflow_finished": 1}
+  },
+  {
+    "mode": "workflow",
+    "app_id": "5e84f3e8-b9d4-4283-b10c-d479d5dd1e43",
+    "inputs": {"inputs": {"inputs": {"x": 1}}},
+    "expected": {"node_started": 2, "node_finished": 2, "workflow_finished": 1}
+  },
+  {
+    "mode": "agent-chat",
+    "app_id": "1f05dbfc-1d82-4591-bbae-40c25eaa3d8b",
+    "inputs": {"inputs": {"inputs": {}, "query": "What time is it now?"}},
+    "expected": {"agent_thought": 1, "tool_call": 1, "workflow_finished": 1}
+  }
+]

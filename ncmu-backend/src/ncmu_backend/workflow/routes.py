@@ -91,7 +91,7 @@ async def run_workflow(
     async def event_stream():
         try:
             async for evt in dispatcher.dispatch(
-                mode, run_id, app_id, user_id, inputs
+                db, mode, run_id, app_id, user_id, inputs
             ):
                 evt_dict = evt.model_dump(mode="json")
                 # 先 append DB（spec §4.4 时序保证），失败标 db_error 不阻塞推送

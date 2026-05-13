@@ -1,5 +1,5 @@
-{"event":"node_started","data":{"node_id":"start","node_type":"start","title":"Start"}}
-{"event":"node_finished","data":{"node_id":"start","node_type":"start","status":"succeeded","elapsed_time":5,"outputs":{}}}
+{"event":"node_started","data":{"node_id":"start","node_type":"start","title":"Start","inputs":null}}
+{"event":"node_finished","data":{"node_id":"start","node_type":"start","status":"succeeded","elapsed_time":5,"outputs":null}}
 {"event":"node_started","data":{"node_id":"http_1","node_type":"http_request","title":"HTTP"}}
 {"event":"node_finished","data":{"node_id":"http_1","node_type":"http_request","status":"succeeded","elapsed_time":1500,"outputs":{"body":"ok"}}}
 {"event":"workflow_finished","data":{"status":"succeeded","elapsed_time":1600,"outputs":{"result":"ok"}}}

@@ -130,3 +130,190 @@ def test_ncmu_sse_event_envelope_event_type_literal_rejects_unknown():
         timestamp=datetime.now(timezone.utc),
         data={"code": 9001, "message": "upstream failed"},
     )
+
+
+# =====================================================================
+# REWORK-79-BACKEND-SCHEMA — Dify v1.13.3 真 wire 是 float, schema 不抛
+# (Bug #1 + #3 类型错位 / mock-vs-real 第 9 次实证).
+# =====================================================================
+
+# --------------------------------------------------------------------- #
+# (f) WorkflowFinishedData.total_elapsed_ms accepts a real Dify float
+#     value (message_end.metadata.usage.latency / workflow_finished.
+#     elapsed_time live on the wire as float per
+#     dify_graph/model_runtime/entities/llm_entities.py:40,61 +
+#     api/core/app/entities/task_entities.py:237,267,403,...).
+# --------------------------------------------------------------------- #
+def test_workflow_finished_total_elapsed_ms_accepts_float():
+    from ncmu_backend.schemas.sse_events import WorkflowFinishedData
+
+    # The exact value observed in the Pane 1 BLOCKED-3 capture
+    # (Dify completion-messages message_end.metadata.usage.latency).
+    ev = WorkflowFinishedData(
+        status="succeeded",
+        total_elapsed_ms=1.2286831319797784,
+    )
+    assert isinstance(ev.total_elapsed_ms, float)
+    assert ev.total_elapsed_ms == 1.2286831319797784
+
+    # int input still validates (Pydantic non-strict coerces int → float);
+    # protects existing fixtures (test_advanced_chat / completion / workflow)
+    # that use round numbers like 1500 / 2400 / 1600.
+    ev_int = WorkflowFinishedData(status="succeeded", total_elapsed_ms=2400)
+    assert ev_int.total_elapsed_ms == 2400.0
+
+    # None still allowed (sentinel for "Dify didn't ship a latency this round").
+    ev_none = WorkflowFinishedData(status="succeeded")
+    assert ev_none.total_elapsed_ms is None
+
+
+# --------------------------------------------------------------------- #
+# (g) NodeFinishedData.elapsed_ms accepts a real Dify float (Dify
+#     v1.13.3 task_entities.NodeFinishStreamResponse.elapsed_time:
+#     float; advanced_chat / workflow orchestrators pipe it verbatim).
+# --------------------------------------------------------------------- #
+def test_node_finished_elapsed_ms_accepts_float():
+    from ncmu_backend.schemas.sse_events import NodeFinishedData
+
+    ev = NodeFinishedData(
+        node_id="llm_1",
+        node_type="llm",
+        status="succeeded",
+        elapsed_ms=0.4321,
+    )
+    assert isinstance(ev.elapsed_ms, float)
+    assert ev.elapsed_ms == 0.4321
+
+    # int still validates (mock fixtures backward compat).
+    ev_int = NodeFinishedData(
+        node_id="http_1", node_type="http", status="succeeded", elapsed_ms=1500,
+    )
+    assert ev_int.elapsed_ms == 1500.0
+
+
+# =====================================================================
+# REWORK-79-BACKEND-SCHEMA-FIX-2 — NodeStartedData.inputs accepts the
+# null Dify v1.13.3 emits when a node has no declared inputs
+# (mock-vs-real 第 8.5 次同型 / 防御链 schema layer).
+# =====================================================================
+
+# --------------------------------------------------------------------- #
+# (h) NodeStartedData(inputs=None) coerces to {} (the literal Dify wire
+#     shape — task_entities.py:346 declares
+#     ``inputs: Mapping[str, Any] | None = None`` for the node_started
+#     family). Without the field_validator, Pydantic strict ``dict`` would
+#     reject the None and raise ValidationError.
+# --------------------------------------------------------------------- #
+def test_node_started_data_inputs_none_coerces_to_empty_dict():
+    from ncmu_backend.schemas.sse_events import NodeStartedData
+
+    ev = NodeStartedData(
+        node_id="start_1",
+        node_type="start",
+        title="开始",
+        inputs=None,  # ← Dify's wire literal for "no inputs"
+    )
+    assert ev.inputs == {}
+    assert isinstance(ev.inputs, dict)
+
+    # default (omitted) still produces {} (sanity — Field(default_factory=dict)
+    # path unchanged).
+    ev_default = NodeStartedData(node_id="n1", node_type="llm")
+    assert ev_default.inputs == {}
+
+
+# --------------------------------------------------------------------- #
+# (i) NcmuSseEvent envelope with a node_started body carrying
+#     ``inputs: null`` does NOT raise ValidationError — mimics the exact
+#     orchestrator path (Dify SSE frame → NodeStartedData → NcmuSseEvent).
+# --------------------------------------------------------------------- #
+def test_ncmu_sse_event_with_node_started_null_inputs():
+    from ncmu_backend.schemas.sse_events import NcmuSseEvent, NodeStartedData
+
+    # The shape Dify emits + the way the orchestrator wraps it.
+    ev = NcmuSseEvent(
+        event_type="node_started",
+        run_id=uuid.uuid4(),
+        timestamp=datetime.now(timezone.utc),
+        data=NodeStartedData(
+            node_id="llm_1",
+            node_type="llm",
+            title="LLM 推理",
+            inputs=None,  # Dify v1.13.3 真 wire literal
+        ),
+    )
+    assert isinstance(ev.data, NodeStartedData)
+    assert ev.data.inputs == {}
+
+
+# =====================================================================
+# REWORK-79-BACKEND-SCHEMA-FIX-3 — NodeFinishedData.outputs +
+# WorkflowFinishedData.outputs accept the null Dify v1.13.3 emits when a
+# node / workflow produces no output (same shape as inputs=null, same
+# defense pattern; preemptive vs Pane 1 第 6 轮 BLOCKED).
+# =====================================================================
+
+# --------------------------------------------------------------------- #
+# (j) NodeFinishedData(outputs=None) coerces to {} (Dify wire literal
+#     per task_entities.py:235/399/463/571/653/810 —
+#     ``outputs: Mapping[str, Any] | None = None``).
+# --------------------------------------------------------------------- #
+def test_node_finished_data_outputs_none_coerces_to_empty_dict():
+    from ncmu_backend.schemas.sse_events import NodeFinishedData
+
+    ev = NodeFinishedData(
+        node_id="start_1",
+        node_type="start",
+        status="succeeded",
+        outputs=None,  # ← Dify's wire literal for "node produced no output"
+    )
+    assert ev.outputs == {}
+    assert isinstance(ev.outputs, dict)
+
+    # default (omitted) still produces {} (sanity — Field(default_factory=dict)
+    # path unchanged after the validator).
+    ev_default = NodeFinishedData(node_id="n1", node_type="llm", status="succeeded")
+    assert ev_default.outputs == {}
+
+
+# --------------------------------------------------------------------- #
+# (k) WorkflowFinishedData(outputs=None) coerces to {} (Dify wire literal
+#     per task_entities.py:810 WorkflowFinishStreamResponse).
+# --------------------------------------------------------------------- #
+def test_workflow_finished_data_outputs_none_coerces_to_empty_dict():
+    from ncmu_backend.schemas.sse_events import WorkflowFinishedData
+
+    ev = WorkflowFinishedData(
+        status="succeeded",
+        outputs=None,
+    )
+    assert ev.outputs == {}
+    assert isinstance(ev.outputs, dict)
+
+    # default (omitted) still produces {}.
+    ev_default = WorkflowFinishedData(status="failed")
+    assert ev_default.outputs == {}
+
+
+# --------------------------------------------------------------------- #
+# (l) NcmuSseEvent envelope with a node_finished body carrying
+#     ``outputs: null`` does NOT raise ValidationError — full path test.
+# --------------------------------------------------------------------- #
+def test_ncmu_sse_event_with_node_finished_null_outputs():
+    from ncmu_backend.schemas.sse_events import NcmuSseEvent, NodeFinishedData
+
+    ev = NcmuSseEvent(
+        event_type="node_finished",
+        run_id=uuid.uuid4(),
+        timestamp=datetime.now(timezone.utc),
+        data=NodeFinishedData(
+            node_id="end_1",
+            node_type="end",
+            status="succeeded",
+            outputs=None,  # Dify v1.13.3 真 wire literal for terminal nodes
+            elapsed_ms=0.123,
+        ),
+    )
+    assert isinstance(ev.data, NodeFinishedData)
+    assert ev.data.outputs == {}
+    assert ev.data.elapsed_ms == 0.123

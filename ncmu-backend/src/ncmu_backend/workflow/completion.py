@@ -24,6 +24,7 @@ from typing import Any, AsyncIterator
 
 from ncmu_backend.schemas.sse_events import NcmuSseEvent, WorkflowFinishedData
 from ncmu_backend.workflow._base import BaseOrchestrator
+from ncmu_backend.workflow.dify_client import DifyStreamClient
 
 
 class CompletionOrchestrator(BaseOrchestrator):
@@ -33,6 +34,7 @@ class CompletionOrchestrator(BaseOrchestrator):
 
     async def run(
         self,
+        dify_client: DifyStreamClient,
         run_id: uuid.UUID,
         app_id: str,
         user_id: uuid.UUID,
@@ -45,7 +47,7 @@ class CompletionOrchestrator(BaseOrchestrator):
             "response_mode": "streaming",
         }
         accumulated_text = ""
-        async for raw in self._dify.stream("/v1/completion-messages", body):
+        async for raw in dify_client.stream("/v1/completion-messages", body):
             event_name = raw.get("event")
             if event_name == "message":
                 # Accumulated answer path — Dify pushes the running answer

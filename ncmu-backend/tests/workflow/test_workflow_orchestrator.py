@@ -51,10 +51,10 @@ def _load_fixture_frames() -> list[dict[str, Any]]:
 class _FakeDifyStreamClient(DifyStreamClient):
     """Replay fixture frames in order; record (path, body) per call.
 
-    Inherits from `DifyStreamClient` so `WorkflowOrchestrator(self._dify)`
-    type-checks identically to production. Only `.stream()` is overridden;
-    base `__init__` is bypassed because the fake never opens an HTTP
-    connection.
+    Inherits from `DifyStreamClient` so WorkflowOrchestrator's `dify_client`
+    parameter type-checks identically to production. Only `.stream()` is
+    overridden; base `__init__` is bypassed because the fake never opens
+    an HTTP connection.
     """
 
     def __init__(self) -> None:  # noqa: D401 — stub, no super().__init__
@@ -77,8 +77,11 @@ def fake_dify() -> _FakeDifyStreamClient:
 
 
 @pytest.fixture
-def orchestrator(fake_dify: _FakeDifyStreamClient) -> WorkflowOrchestrator:
-    return WorkflowOrchestrator(fake_dify)
+def orchestrator() -> WorkflowOrchestrator:
+    """ARCH-FIX-79: orchestrator is now stateless — dispatcher (in production)
+    injects the per-App client via .run()'s first arg; tests pass ``fake_dify``
+    directly to .run() (see ``_collect`` below)."""
+    return WorkflowOrchestrator()
 
 
 @pytest.fixture
@@ -91,19 +94,33 @@ def run_kwargs() -> dict[str, Any]:
     }
 
 
+def _fake_db_null_token():
+    """AsyncMock db whose execute().first() returns (None,) — so
+    ModeDispatcher.resolve_token falls back to the default client's token
+    (ARCH-FIX-79 backward-compat path for tests that don't seed dify_apps)."""
+    from unittest.mock import AsyncMock, MagicMock
+    fake_db = AsyncMock()
+    fake_result = MagicMock()
+    fake_result.first = MagicMock(return_value=(None,))
+    fake_db.execute = AsyncMock(return_value=fake_result)
+    return fake_db
+
+
 async def _collect(
-    orch: WorkflowOrchestrator, kwargs: dict[str, Any]
+    orch: WorkflowOrchestrator,
+    dify: DifyStreamClient,
+    kwargs: dict[str, Any],
 ) -> list[NcmuSseEvent]:
-    return [evt async for evt in orch.run(**kwargs)]
+    return [evt async for evt in orch.run(dify, **kwargs)]
 
 
 # --------------------------------------------------------------------- #
 # (a) AC#3(a) — yields 5 events with the expected (event_type) breakdown
 # --------------------------------------------------------------------- #
 async def test_a_yields_five_events_with_correct_types(
-    orchestrator: WorkflowOrchestrator, run_kwargs: dict[str, Any]
+    orchestrator: WorkflowOrchestrator, fake_dify: _FakeDifyStreamClient, run_kwargs: dict[str, Any]
 ) -> None:
-    events = await _collect(orchestrator, run_kwargs)
+    events = await _collect(orchestrator, fake_dify, run_kwargs)
 
     assert len(events) == 5, f"expected 5 events, got {len(events)}"
     types = [e.event_type for e in events]
@@ -116,9 +133,9 @@ async def test_a_yields_five_events_with_correct_types(
 # (b) AC#3(b) — NodeFinishedData.outputs.body == "ok" on http_1 node
 # --------------------------------------------------------------------- #
 async def test_b_http_node_outputs_body_equals_ok(
-    orchestrator: WorkflowOrchestrator, run_kwargs: dict[str, Any]
+    orchestrator: WorkflowOrchestrator, fake_dify: _FakeDifyStreamClient, run_kwargs: dict[str, Any]
 ) -> None:
-    events = await _collect(orchestrator, run_kwargs)
+    events = await _collect(orchestrator, fake_dify, run_kwargs)
     finished = [e for e in events if e.event_type == "node_finished"]
     http_node = next(e for e in finished if e.data.node_id == "http_1")
 
@@ -133,9 +150,9 @@ async def test_b_http_node_outputs_body_equals_ok(
 # (c) AC#3(c) — WorkflowFinishedData.outputs.result == "ok"
 # --------------------------------------------------------------------- #
 async def test_c_workflow_finished_outputs_result_equals_ok(
-    orchestrator: WorkflowOrchestrator, run_kwargs: dict[str, Any]
+    orchestrator: WorkflowOrchestrator, fake_dify: _FakeDifyStreamClient, run_kwargs: dict[str, Any]
 ) -> None:
-    events = await _collect(orchestrator, run_kwargs)
+    events = await _collect(orchestrator, fake_dify, run_kwargs)
     wf = next(e for e in events if e.event_type == "workflow_finished")
 
     assert isinstance(wf.data, WorkflowFinishedData)
@@ -148,9 +165,9 @@ async def test_c_workflow_finished_outputs_result_equals_ok(
 # (d) AC#3(d) — WorkflowFinishedData.total_elapsed_ms == 1600
 # --------------------------------------------------------------------- #
 async def test_d_workflow_total_elapsed_ms_equals_1600(
-    orchestrator: WorkflowOrchestrator, run_kwargs: dict[str, Any]
+    orchestrator: WorkflowOrchestrator, fake_dify: _FakeDifyStreamClient, run_kwargs: dict[str, Any]
 ) -> None:
-    events = await _collect(orchestrator, run_kwargs)
+    events = await _collect(orchestrator, fake_dify, run_kwargs)
     wf = next(e for e in events if e.event_type == "workflow_finished")
 
     assert isinstance(wf.data, WorkflowFinishedData)
@@ -161,9 +178,9 @@ async def test_d_workflow_total_elapsed_ms_equals_1600(
 # (e) AC#3(e) — order matches fixture line order
 # --------------------------------------------------------------------- #
 async def test_e_event_order_matches_fixture(
-    orchestrator: WorkflowOrchestrator, run_kwargs: dict[str, Any]
+    orchestrator: WorkflowOrchestrator, fake_dify: _FakeDifyStreamClient, run_kwargs: dict[str, Any]
 ) -> None:
-    events = await _collect(orchestrator, run_kwargs)
+    events = await _collect(orchestrator, fake_dify, run_kwargs)
 
     type_seq = [e.event_type for e in events]
     assert type_seq == [
@@ -200,12 +217,16 @@ async def test_f_dispatcher_dispatch_routes_to_workflow_orchestrator(
     dispatcher = ModeDispatcher(
         DifyStreamClient(base_url="http://dify-api:5001", api_key="k")
     )
-    dispatcher.register("workflow", WorkflowOrchestrator(fake_dify))
+    # ARCH-FIX-79: dispatcher.get_client returns the cached default client
+    # for NULL-token rows. Seed cache with our fake so the orchestrator
+    # receives ``fake_dify`` at .run() time.
+    dispatcher._client_cache["k"] = fake_dify
+    dispatcher.register("workflow", WorkflowOrchestrator())
 
     events = [
         evt
         async for evt in dispatcher.dispatch(
-            "workflow",
+            _fake_db_null_token(), "workflow",
             run_kwargs["run_id"],
             run_kwargs["app_id"],
             run_kwargs["user_id"],
@@ -226,7 +247,7 @@ async def test_g_orchestrator_calls_workflows_run_endpoint_with_correct_body(
     fake_dify: _FakeDifyStreamClient,
     run_kwargs: dict[str, Any],
 ) -> None:
-    await _collect(orchestrator, run_kwargs)
+    await _collect(orchestrator, fake_dify, run_kwargs)
 
     assert len(fake_dify.calls) == 1, (
         f"expected exactly 1 stream() call, got {len(fake_dify.calls)}"

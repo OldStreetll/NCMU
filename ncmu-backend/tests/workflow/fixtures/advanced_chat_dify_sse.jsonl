@@ -1,5 +1,5 @@
-{"event":"node_started","task_id":"t1","workflow_run_id":"r1","data":{"id":"e1","node_id":"start_1","node_type":"start","title":"开始","inputs":{}}}
-{"event":"node_finished","task_id":"t1","workflow_run_id":"r1","data":{"id":"e2","node_id":"start_1","node_type":"start","status":"succeeded","elapsed_time":12,"outputs":{}}}
+{"event":"node_started","task_id":"t1","workflow_run_id":"r1","data":{"id":"e1","node_id":"start_1","node_type":"start","title":"开始","inputs":null}}
+{"event":"node_finished","task_id":"t1","workflow_run_id":"r1","data":{"id":"e2","node_id":"start_1","node_type":"start","status":"succeeded","elapsed_time":12,"outputs":null}}
 {"event":"node_started","task_id":"t1","workflow_run_id":"r1","data":{"id":"e3","node_id":"llm_1","node_type":"llm","title":"LLM 推理","inputs":{}}}
 {"event":"node_finished","task_id":"t1","workflow_run_id":"r1","data":{"id":"e4","node_id":"llm_1","node_type":"llm","status":"succeeded","elapsed_time":2300,"outputs":{"text":"hello"}}}
 {"event":"message","task_id":"t1","answer":"hello"}

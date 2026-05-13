@@ -2,3 +2,4 @@
 {"event":"text_chunk","data":{"text":"结"}}
 {"event":"message","answer":"果"}
 {"event":"message_end","metadata":{"usage":{"latency":1200}}}
+{"event":"workflow_finished","data":{"status":"succeeded","outputs":null}}
