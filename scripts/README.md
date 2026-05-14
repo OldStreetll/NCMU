@@ -261,3 +261,141 @@ tenant's RSA private key. After `down -v`:
 
 ===== DONE — Dify recovery complete =====
 ```
+
+## Dify ADMIN_API_KEY 生成 + 轮换（TASK-A B-NEW-39 / 2026-05-14+）
+
+NCMU 调 Dify Console（admin `/sync_apps` + 用户 `/apps`）使用 Dify v1.13.3
+原生 `ADMIN_API_KEY` 旁路机制（`libs/token.py:192-195`）：永不过期、
+跳过 CSRF 检查、跳过 30-min JWT refresh 仪式。值由 NCMU 团队生成一
+次并同步注入两处。
+
+### 首次生成
+
+```bash
+# 1. 生成 256-bit random key（Windows native bash 或 WSL2 均可）
+DIFY_ADMIN_API_KEY=$(openssl rand -hex 32)
+
+# 2. 备份到 NCMU 仓外（不入 git；.gitignore 守护）
+echo "$DIFY_ADMIN_API_KEY" > /mnt/d/Project/AIConsProject/NCMU_Proj/.dify_admin_key_backup
+chmod 600 /mnt/d/Project/AIConsProject/NCMU_Proj/.dify_admin_key_backup
+
+# 3. 注入 NCMU/.env（DIFY_ADMIN_API_KEY 让 docker-compose.override.yaml
+#    的 `${DIFY_ADMIN_API_KEY:?...}` 替换 dify-api+dify-worker 的
+#    ADMIN_API_KEY env 变量；DIFY_CONSOLE_API_KEY 同值供 ncmu-backend
+#    env_file 注入 Settings）。建议先备份：
+#       cp NCMU/.env NCMU/.env.bak-task-a-$(date +%F)
+#    然后追加两行（同值）：
+echo "DIFY_ADMIN_API_KEY=$DIFY_ADMIN_API_KEY" >> \
+  /mnt/d/Project/AIConsProject/NCMU_Proj/NCMU/.env
+#    并将 NCMU/.env 中既有的 `DIFY_CONSOLE_API_KEY=<旧手刷 JWT>` 改为
+#    `DIFY_CONSOLE_API_KEY=$DIFY_ADMIN_API_KEY`（同值，变量名不动）。
+#    注意：上游 Dify 仓 MCMURefAndRelated/dify/docker/.env 不需改动 —
+#    本项目运行的 compose project 是 NCMU/（`docker compose ls` 显示
+#    project name = ncmu），上游 dify/docker/ 是参考代码非运行 stack。
+
+# 4. 重启 Dify api + worker（让 ADMIN_API_KEY_ENABLE 生效）+ NCMU backend
+#    （让新 DIFY_CONSOLE_API_KEY 重新 build Settings）。NCMU compose
+#    把 Dify 服务命名为 dify-api / dify-worker（容器名 ncmu-dify-api /
+#    ncmu-dify-worker），不是上游的 api/worker。
+cd /mnt/d/Project/AIConsProject/NCMU_Proj/NCMU
+docker compose restart dify-api dify-worker ncmu-backend
+```
+
+### 验证（一次性 smoke）
+
+```bash
+# A. 直接打 Dify Console（绕过 NCMU）— 验 ADMIN_API_KEY 生效
+DIFY_ADMIN_API_KEY=$(cat /mnt/d/Project/AIConsProject/NCMU_Proj/.dify_admin_key_backup)
+curl -s -o /dev/null -w "%{http_code}\n" \
+  -H "Authorization: Bearer $DIFY_ADMIN_API_KEY" \
+  "http://localhost:8080/console/api/apps?limit=1&page=1"
+# 期望: 200
+
+# B. 经 NCMU /apps 跳通
+JWT=$(curl -s -X POST "http://localhost/api/v1/ncmu/auth/dev-login" \
+  -H "Content-Type: application/json" \
+  -d '{"user_id":"a0000001-0000-4000-8000-000000000001"}' | jq -r '.jwt')
+curl -s -o /dev/null -w "%{http_code}\n" \
+  -H "Authorization: Bearer $JWT" \
+  "http://localhost/api/v1/ncmu/apps"
+# 期望: 200
+```
+
+### 轮换（怀疑泄漏 / 例行）
+
+1. 备份当前 key：
+   ```bash
+   cp /mnt/d/Project/AIConsProject/NCMU_Proj/.dify_admin_key_backup \
+      /mnt/d/Project/AIConsProject/NCMU_Proj/.dify_admin_key_backup.$(date +%F)
+   ```
+2. 重跑「首次生成」Step 1-6（新值覆盖旧值，两处 .env 必须同步改）。
+3. 重跑「验证」smoke 全过。
+
+### 安全约束
+
+- `NCMU/.env` 已被 `.gitignore` 覆盖（`git check-ignore .env` 应回显路径）；
+  切勿手动 `git add .env`。
+- `.dify_admin_key_backup` 文件 `chmod 600`（仅 owner 读写）。
+- 等级：跟 admin DB password 同级 — 泄漏即等价于完整 Dify Console 控制权。
+- 一旦 rotate，旧 key 立即失效；不存在 grace period。
+
+## Dify DIFY_TENANT_ID 取 + 注入（INDEP-FIX-DEPLOY-2 / 路径 B'）
+
+ADMIN_API_KEY 旁路在 Dify v1.13.3 **额外要求** `X-WORKSPACE-ID` header
+（`libs/login/ext_login.py:56-72`：line 60 `if workspace_id:` 守门 —
+没值则 fall-through 到 console JWT 验证，admin key 当 JWT 解失败
+"Invalid token"）。该值是 owner tenant 的 UUID，**整个 Dify 实例一份
+固定值**（除非删 owner account / re-init）。
+
+### 取 tenant_id
+
+```bash
+docker exec ncmu-pg-dify psql -U dify -d dify -c \
+  "SELECT id FROM tenants t \
+     JOIN tenant_account_joins taj ON taj.tenant_id=t.id \
+    WHERE taj.role='owner';"
+```
+
+预期输出形如：
+```
+                  id
+--------------------------------------
+ 3d0c79e3-fed6-4c01-9dd9-a5f588632b22
+```
+
+### 注入
+
+把该 UUID 追加到 `NCMU/.env` 一行：
+```bash
+echo "DIFY_TENANT_ID=<uuid from psql output>" >> \
+  /mnt/d/Project/AIConsProject/NCMU_Proj/NCMU/.env
+```
+
+然后 restart ncmu-backend 让 Settings 重建：
+```bash
+cd /mnt/d/Project/AIConsProject/NCMU_Proj/NCMU
+docker compose restart ncmu-backend
+```
+
+### 验证 X-WORKSPACE-ID 已生效
+
+```bash
+# 直接 curl Dify Console with 双 header — 应 200 + "data" 数组
+DIFY_ADMIN_API_KEY=$(cat /mnt/d/Project/AIConsProject/NCMU_Proj/.dify_admin_key_backup)
+DIFY_TENANT_ID=<uuid>
+curl -s -w "\n%{http_code}\n" \
+  -H "Authorization: Bearer $DIFY_ADMIN_API_KEY" \
+  -H "X-WORKSPACE-ID: $DIFY_TENANT_ID" \
+  "http://localhost:8080/console/api/apps?limit=10&page=1"
+```
+
+### 何时 rotate
+
+`DIFY_TENANT_ID` 与 `ADMIN_API_KEY` **解耦** — admin key 轮换不需重新取
+tenant_id。tenant_id 只有在以下情况会变：
+- Dify 数据库被重建（`down -v` + 重做 setup flow）
+- owner account 被删并重建
+- 多 tenant 部署切换 owner
+
+正常 ops 下 `DIFY_TENANT_ID` 是**一次设置 / 长期不变**配置。
+

@@ -114,6 +114,7 @@ async def sync_apps(
         http=http,
         base_url=settings.DIFY_BASE_URL,
         api_key=settings.DIFY_CONSOLE_API_KEY,
+        tenant_id=settings.DIFY_TENANT_ID,
     )
     upsert_count = 0
     for row in raw:

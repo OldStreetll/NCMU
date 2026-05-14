@@ -20,7 +20,9 @@ the long-lived event_stream loop) + L-FIX-1 (resolve_mode fallback
 from __future__ import annotations
 
 import logging
+import os
 import uuid
+from collections import OrderedDict
 from typing import Any, AsyncIterator
 
 from sqlalchemy import select
@@ -41,20 +43,39 @@ class ModeDispatcher:
     agent-chat。B2 task TASK-71/72/73/74 各 register 一个 orchestrator.
     """
 
-    def __init__(self, default_client: DifyStreamClient):
+    def __init__(
+        self,
+        default_client: DifyStreamClient,
+        *,
+        max_size: int | None = None,
+    ) -> None:
         """``default_client`` supplies (base_url, default_token, timeout)
         for the per-App client cache. The default token is also the
         fallback when ``dify_apps.api_token IS NULL`` — preserves Phase 1
         chat App backward compatibility for any row that has not been
         backfilled with a per-App token.
+
+        ``max_size`` caps the per-token client cache to bound memory
+        across admin token rotations (B-NEW-44). Defaults to 32 (env
+        override ``DISPATCHER_CACHE_MAX_SIZE``); the default token never
+        counts against ``max_size`` and never gets evicted. Phase 1
+        实际 App 数 ~5 ≪ 32 → eviction in practice never triggers
+        (防御性设计 / phase 3+ multi-tenant 才会真用上).
         """
         self._default_client = default_client
+        # Recorded so eviction can anchor the chat App's slot — eviction
+        # skips this token even if it is the LRU entry.
+        self._default_token = default_client.api_key
         # Cache keyed by token. Seeded with the default so the chat App's
         # token resolves to the same client instance the lifespan startup
         # constructed (one less httpx.AsyncClient lifecycle to manage).
-        self._client_cache: dict[str, DifyStreamClient] = {
-            default_client.api_key: default_client
-        }
+        self._client_cache: OrderedDict[str, DifyStreamClient] = OrderedDict()
+        self._client_cache[self._default_token] = default_client
+        self._max_size = (
+            max_size
+            if max_size is not None
+            else int(os.environ.get("DISPATCHER_CACHE_MAX_SIZE", "32"))
+        )
         self._registry: dict[str, BaseOrchestrator] = {}
 
     def register(self, mode: str, orchestrator: BaseOrchestrator) -> None:
@@ -125,16 +146,44 @@ class ModeDispatcher:
         """Return the cached DifyStreamClient for ``token`` (create + cache
         on miss). Each constructed client reuses the default's
         ``base_url`` + ``timeout`` — only the bearer token varies per App.
+
+        B-NEW-44 LRU eviction: on cache hit, the token is promoted to
+        MRU (most-recently-used). On miss, after inserting the new
+        client, if total entries exceed ``max_size + 1`` (max_size
+        non-default slots + 1 default 永驻 slot) the oldest non-default
+        entry is evicted. The default token is anchored and never
+        evicted.
         """
         cached = self._client_cache.get(token)
         if cached is not None:
+            # Cache hit — promote to MRU so eviction skips it next pass.
+            self._client_cache.move_to_end(token)
             return cached
+
+        # Cache miss — create + insert (insertion places it at MRU end).
         client = DifyStreamClient(
             base_url=self._default_client.base_url,
             api_key=token,
             timeout=self._default_client.timeout,
         )
         self._client_cache[token] = client
+
+        # Eviction: total capacity = max_size non-default + 1 default 永驻.
+        while len(self._client_cache) > self._max_size + 1:
+            # Find the oldest entry that is not the anchored default and
+            # drop it. Iterating insertion order (OrderedDict default)
+            # yields LRU first; snapshot via ``list`` so the iterator
+            # never sees the mutation we make inside.
+            for k in list(self._client_cache):
+                if k != self._default_token:
+                    del self._client_cache[k]
+                    break
+            else:
+                # Only the default remains (cannot really happen given
+                # we just inserted a non-default token, but bail safely
+                # rather than loop forever).
+                break
+
         return client
 
     async def dispatch(

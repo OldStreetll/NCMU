@@ -311,3 +311,87 @@ async def test_cache_is_keyed_per_user(app_client_with_clock, jwt_secret):
         )
         assert r_a2.status_code == 200
         assert route.call_count == 2  # still 2; user A's second call hits cache
+
+
+# --------------------------------------------------------------------- #
+# TASK-A B-NEW-39 — admin key header 字面对账（REWORK-DEPLOY-2: path B')
+#
+# Path B' (Dify ADMIN_API_KEY 旁路 + X-WORKSPACE-ID) reuses the existing
+# `DIFY_CONSOLE_API_KEY` env var; only its *value* swaps from a 30-min
+# manual JWT to a never-expiring magic key. Dify ``ext_login.py:56-72``
+# additionally gates the bypass on a non-empty ``X-WORKSPACE-ID``
+# header containing the owner tenant UUID — without it the request
+# falls through to console JWT verify and the admin key is rejected as
+# "Invalid token". The two outbound headers NCMU sends to
+# `/console/api/apps` must therefore both match the env config; this
+# test regression-locks both at the same time so a future refactor
+# can't silently drop either half.
+# --------------------------------------------------------------------- #
+async def test_list_apps_calls_dify_console_with_admin_key(
+    app_client_with_clock, jwt_token, monkeypatch
+):
+    """Outbound `GET /console/api/apps` carries Bearer <DIFY_CONSOLE_API_KEY>
+    AND X-WORKSPACE-ID <DIFY_TENANT_ID>.
+
+    The fake values are injected via ``monkeypatch.setenv`` and the
+    settings cache is cleared so the next request rebuilds ``Settings``
+    from the new env (mirrors the ``app_client`` fixture's own pattern).
+    """
+    from ncmu_backend.config import reset_settings_cache
+
+    client, _advance = app_client_with_clock
+
+    # 模拟生产 NCMU/.env: DIFY_CONSOLE_API_KEY = ${DIFY_ADMIN_API_KEY} 同值
+    # + DIFY_TENANT_ID (path B' — INDEP-FIX-DEPLOY-2).
+    fake_admin_key = "test-admin-api-key-256bit-entropy-value"
+    fake_tenant_id = "fake-tenant-uuid-3d0c79e3-fed6-4c01-9dd9-a5f588632b22"
+    monkeypatch.setenv("DIFY_CONSOLE_API_KEY", fake_admin_key)
+    monkeypatch.setenv("DIFY_TENANT_ID", fake_tenant_id)
+    # Settings is lru_cached; reset so the request-time Depends(get_settings)
+    # rebuilds against the patched env (same trick `app_client` uses at
+    # fixture setup time).
+    reset_settings_cache()
+
+    with respx.mock(assert_all_called=True) as rx:
+        route = rx.get(url__regex=r".*/console/api/apps.*").mock(
+            return_value=Response(
+                200,
+                json={
+                    "data": [],
+                    "page": 1,
+                    "limit": 100,
+                    "total": 0,
+                    "has_more": False,
+                },
+            )
+        )
+        resp = await client.get(
+            "/api/v1/ncmu/apps",
+            headers={"Authorization": f"Bearer {jwt_token}"},
+        )
+
+    assert resp.status_code == 200
+    assert route.called, "expected outbound call to Dify Console /apps"
+
+    req = route.calls.last.request
+
+    # 字面对账 #1: outbound Authorization header must equal "Bearer <fake>".
+    auth_header = req.headers.get("authorization") or req.headers.get(
+        "Authorization"
+    )
+    assert auth_header == f"Bearer {fake_admin_key}", (
+        f"outbound Authorization 不匹配 admin key: got {auth_header!r}, "
+        f"expected 'Bearer {fake_admin_key}'"
+    )
+
+    # 字面对账 #2: outbound X-WORKSPACE-ID must equal DIFY_TENANT_ID (path B').
+    # httpx header names are case-insensitive on the wire; try both
+    # spellings so we don't depend on httpx internal normalization choices.
+    workspace_header = req.headers.get("x-workspace-id") or req.headers.get(
+        "X-WORKSPACE-ID"
+    )
+    assert workspace_header == fake_tenant_id, (
+        f"outbound X-WORKSPACE-ID 不匹配 tenant_id: got {workspace_header!r}, "
+        f"expected {fake_tenant_id!r} — path B' (INDEP-FIX-DEPLOY-2) "
+        f"requires this header for Dify ADMIN_API_KEY bypass to succeed"
+    )

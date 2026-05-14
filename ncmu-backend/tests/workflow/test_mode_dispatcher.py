@@ -254,3 +254,83 @@ async def test_dispatch_threads_per_app_client_into_orchestrator():
     assert dispatcher.get_client("per-app-token-xyz") is orch.last_dify_client
     # Sanity: NCMU envelope's data echoes the token (via _FakeOrchestrator yield).
     assert events[0].data["token"] == "per-app-token-xyz"
+
+
+# =====================================================================
+# TASK-A B-NEW-44 — LRU eviction tests
+# ---------------------------------------------------------------------
+# The dispatcher's per-token client cache now bounds its size to
+# ``max_size`` non-default entries + 1 anchored default slot, evicting
+# the oldest non-default entry on miss-insert overflow. Three tests
+# pin the invariants the spec calls out (eviction triggers / hit
+# promotes to MRU / default never evicted).
+# =====================================================================
+
+
+def test_client_cache_evicts_lru_on_overflow():
+    """Filling past ``max_size`` non-default entries drops the oldest
+    non-default token; the anchored default token is never evicted."""
+    default = DifyStreamClient(
+        base_url="http://x", api_key="default-token", timeout=10.0
+    )
+    d = ModeDispatcher(default_client=default, max_size=3)
+
+    # max_size=3 non-default + 1 default 永驻 = 4 total slots.
+    # Insert T1, T2, T3 → cache = {default, T1, T2, T3} (len=4, no evict).
+    d.get_client("T1")
+    d.get_client("T2")
+    d.get_client("T3")
+    assert "default-token" in d._client_cache
+    assert "T1" in d._client_cache
+    assert "T2" in d._client_cache
+    assert "T3" in d._client_cache
+
+    # Insert T4 → cache reaches len=5 > 4 → evict LRU non-default = T1.
+    d.get_client("T4")
+    assert "default-token" in d._client_cache, "default 不应被淘汰"
+    assert "T1" not in d._client_cache, "T1 应被淘汰（最旧非-default）"
+    assert "T2" in d._client_cache
+    assert "T3" in d._client_cache
+    assert "T4" in d._client_cache
+
+
+def test_client_cache_hit_moves_to_end():
+    """A cache hit promotes the token to MRU; the next eviction
+    therefore skips it and drops the new LRU non-default instead."""
+    default = DifyStreamClient(
+        base_url="http://x", api_key="default-token", timeout=10.0
+    )
+    d = ModeDispatcher(default_client=default, max_size=3)
+
+    d.get_client("T1")
+    d.get_client("T2")
+    d.get_client("T3")
+
+    # Touch T1 → promoted to MRU. Insertion-order non-default becomes
+    # T2 (LRU) < T3 < T1 (MRU).
+    d.get_client("T1")
+
+    # Insert T4 → cache len=5 > 4 → evict LRU non-default = T2.
+    d.get_client("T4")
+    assert "T1" in d._client_cache, "T1 命中后变 MRU，不应被淘汰"
+    assert "T2" not in d._client_cache, "T2 现在是最旧非-default，应被淘汰"
+    assert "T3" in d._client_cache
+    assert "T4" in d._client_cache
+
+
+def test_default_token_never_evicted():
+    """Heavy overflow leaves the default token still cached and still
+    resolving to the exact same client instance the dispatcher was
+    seeded with (anchored — eviction never touches it)."""
+    default = DifyStreamClient(
+        base_url="http://x", api_key="default-token", timeout=10.0
+    )
+    d = ModeDispatcher(default_client=default, max_size=3)
+
+    # 100 distinct non-default tokens → cache is forced through many
+    # eviction passes; default still survives.
+    for i in range(100):
+        d.get_client(f"T{i}")
+
+    assert "default-token" in d._client_cache
+    assert d.get_client("default-token") is default

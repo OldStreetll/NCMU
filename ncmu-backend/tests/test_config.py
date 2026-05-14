@@ -4,10 +4,10 @@ Coverage matrix (plan §3 TASK-46 AC#3, eight subcases):
   - prod + `NCMU_JWT_SECRET="CHANGE_ME"` → raise (literal placeholder)
   - prod + `NCMU_JWT_SECRET="CHANGE_ME_DEV_ONLY_PLACEHOLDER_AT_LEAST_32_BYTES"` → raise (config.py default, prefix path)
   - prod + `NCMU_JWT_SECRET="CHANGE_ME_FERNET_OR_OPENSSL_RAND_BASE64_32_CHARS_"` → raise (.env.example default, prefix path)
-  - prod + 5 real values → no raise
+  - prod + 6 real values → no raise
   - dev + literal `CHANGE_ME` → no raise + WARNING captured
   - dev + `CHANGE_ME_<variant>` → no raise + WARNING captured
-  - dev + 5 real values → no warnings emitted by validator
+  - dev + 6 real values → no warnings emitted by validator
   - prod + multi-key placeholder → raise the first key in iteration order
 
 CI / docker-compose impact (plan §3 TASK-46 AC#6):
@@ -33,15 +33,16 @@ REAL_DEFAULTS: dict[str, str] = {
     "NCMU_JWT_SECRET": "real-32byte-secret-from-openssl-rand-base64-32",
     "DIFY_CONSOLE_API_KEY": "real-dify-console-key",
     "DIFY_APP_DEFAULT_TOKEN": "real-dify-app-token",
+    "DIFY_TENANT_ID": "3d0c79e3-fed6-4c01-9dd9-a5f588632b22",
     "FASTGPT_API_KEY": "real-fastgpt-key",
     "SILICONFLOW_API_KEY": "real-siliconflow-key",
 }
 
 
 def _build(**overrides: str) -> Settings:
-    """Build Settings with all 5 sensitive keys set to real values, then apply
+    """Build Settings with all 6 sensitive keys set to real values, then apply
     `overrides`. Lets each test focus on the single field it varies without
-    leaking placeholder defaults from the other four."""
+    leaking placeholder defaults from the other five."""
     kwargs: dict[str, str] = dict(REAL_DEFAULTS)
     kwargs.update(overrides)
     return Settings(**kwargs)
@@ -52,11 +53,16 @@ def _build(**overrides: str) -> Settings:
 # ---------------------------------------------------------------------------
 
 
-def test_sensitive_keys_prod_required_lists_five_fields() -> None:
+def test_sensitive_keys_prod_required_lists_six_fields() -> None:
+    # REWORK-A-INDEP-DEPLOY-2 (2026-05-14): DIFY_TENANT_ID added — Dify
+    # ADMIN_API_KEY bypass (path B') gates on a non-empty X-WORKSPACE-ID
+    # header, so a placeholder tenant_id in prod must fail-fast same as
+    # a placeholder API key.
     assert SENSITIVE_KEYS_PROD_REQUIRED == [
         "NCMU_JWT_SECRET",
         "DIFY_CONSOLE_API_KEY",
         "DIFY_APP_DEFAULT_TOKEN",
+        "DIFY_TENANT_ID",
         "FASTGPT_API_KEY",
         "SILICONFLOW_API_KEY",
     ]

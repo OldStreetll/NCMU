@@ -26,6 +26,7 @@ SENSITIVE_KEYS_PROD_REQUIRED: List[str] = [
     "NCMU_JWT_SECRET",
     "DIFY_CONSOLE_API_KEY",
     "DIFY_APP_DEFAULT_TOKEN",
+    "DIFY_TENANT_ID",
     "FASTGPT_API_KEY",
     "SILICONFLOW_API_KEY",
 ]
@@ -67,7 +68,19 @@ class Settings(BaseSettings):
 
     # --- Dify (Phase 0 envs reused, Phase 1 additions) -------------
     DIFY_BASE_URL: str = "http://dify-api:5001"
+    # Phase 1 2026-05-14+ (TASK-A B-NEW-39): value is Dify ADMIN_API_KEY
+    # (admin bypass token, never expires); must match the
+    # DIFY_ADMIN_API_KEY referenced by NCMU/docker-compose.override.yaml.
+    # See NCMU/scripts/README.md rotation runbook.
     DIFY_CONSOLE_API_KEY: str = "CHANGE_ME"
+    # Phase 1 2026-05-14 INDEP-FIX-DEPLOY-2 (path B'): Dify's
+    # ADMIN_API_KEY bypass also requires `X-WORKSPACE-ID: <tenant_id>`
+    # (ext_login.py:56-72). Pull the owner-tenant UUID with:
+    #   docker exec ncmu-pg-dify psql -U dify -d dify -c \
+    #     "SELECT id FROM tenants t \
+    #        JOIN tenant_account_joins taj ON taj.tenant_id=t.id \
+    #       WHERE taj.role='owner';"
+    DIFY_TENANT_ID: str = "CHANGE_ME"
     DIFY_APP_DEFAULT_TOKEN: str = "CHANGE_ME"  # [KB] App's app_api_token
 
     # --- FastGPT ---------------------------------------------------

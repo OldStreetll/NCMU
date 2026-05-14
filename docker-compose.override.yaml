@@ -1,0 +1,65 @@
+# =====================================================================
+# docker-compose.override.yaml.example
+# =====================================================================
+# Usage:
+#   cp docker-compose.override.yaml.example docker-compose.override.yaml
+#
+# When to enable:
+#   The repo lives on a Windows / WSL2 host where NCMU/ sits on an NTFS
+#   drive (e.g. /mnt/d/...). The default docker-compose.yml bind-mounts
+#   ./data/pg-* into the postgres containers, but the WSL2 9P bridge
+#   does not honour POSIX chmod, so initdb fails with:
+#       chmod: /var/lib/postgresql/data: Operation not permitted
+#       initdb: error: could not change permissions of directory ...
+#   See NCMU-Wiki/sources/phase0/prerequisites-2026-04-21.md §2 for the
+#   reproduction and decision rationale.
+#
+# What it does:
+#   Replaces the bind mounts on the three postgres services
+#   (pg-ncmu / pg-dify / pg-fastgpt) with named volumes managed by
+#   Docker Desktop's VM, which lives on ext4 and supports POSIX perms.
+#
+# Linux hosts (CI, prod): do NOT enable this file. Bind mounts are
+# preferred so the data directories stay browsable from the host.
+# =====================================================================
+
+services:
+  pg-ncmu:
+    volumes:
+      - pg-ncmu-data:/var/lib/postgresql/data
+      - ./docker/init-db/01-pg-ncmu.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+
+  pg-dify:
+    volumes:
+      - pg-dify-data:/var/lib/postgresql/data
+
+  pg-fastgpt:
+    volumes:
+      - pg-fastgpt-data:/var/lib/postgresql/data
+
+  # NCMU TASK-A B-NEW-39: enable Dify ADMIN_API_KEY 旁路 (never-expire
+  # admin bypass token) to replace the 30-min manual JWT NCMU was
+  # otherwise refreshing against /console/api. Both `dify-api` and
+  # `dify-worker` consult the same env var — Dify shares
+  # `libs/token.py:check_csrf_token` between them and setting it on
+  # only one container half breaks admin /sync_apps. The `:?` form
+  # fails `docker compose up` fast if NCMU/.env is missing the key,
+  # which is preferable to a silent fallback to JWT auth.
+  # Service names (dify-api, dify-worker) match NCMU/docker-compose.yml
+  # lines 219 + 293 — the upstream Dify repo uses `api`/`worker`, but
+  # NCMU rewires them under the `ncmu-*` container prefix.
+  # See NCMU-Wiki/sources/phase3/2026-05-14-task-a-admin-api-key-and-cache-eviction-spec.md
+  dify-api:
+    environment:
+      ADMIN_API_KEY_ENABLE: "true"
+      ADMIN_API_KEY: "${DIFY_ADMIN_API_KEY:?DIFY_ADMIN_API_KEY required in NCMU/.env}"
+
+  dify-worker:
+    environment:
+      ADMIN_API_KEY_ENABLE: "true"
+      ADMIN_API_KEY: "${DIFY_ADMIN_API_KEY:?DIFY_ADMIN_API_KEY required in NCMU/.env}"
+
+volumes:
+  pg-ncmu-data:
+  pg-dify-data:
+  pg-fastgpt-data:

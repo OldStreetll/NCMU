@@ -120,12 +120,18 @@ class DifyConsoleClient:
         http: httpx.AsyncClient,
         base_url: str,
         api_key: str,
+        tenant_id: str,
     ) -> list[dict[str, Any]]:
         """Return raw Dify App dicts. Cached per user_id for TTL seconds.
 
         Caller is responsible for projecting to AppOut + filtering to
         kb_qa via `detect_app_type` — this method only handles fetch +
         cache + error mapping.
+
+        ``tenant_id`` is forwarded to ``_fetch`` so the outbound request
+        carries the ``X-WORKSPACE-ID`` header Dify's ADMIN_API_KEY
+        bypass requires (path B' / INDEP-FIX-DEPLOY-2 / Dify
+        ``libs/login/ext_login.py:56-72``).
 
         Raises HTTPException(502, {"code": 1003|9001, ...}) on Dify failure.
         """
@@ -139,7 +145,9 @@ class DifyConsoleClient:
             return cached[0]
 
         log.info("dify_console_client cache MISS user=%s — fetching upstream", user_id)
-        raw = await self._fetch(http=http, base_url=base_url, api_key=api_key)
+        raw = await self._fetch(
+            http=http, base_url=base_url, api_key=api_key, tenant_id=tenant_id,
+        )
         self._cache[user_id] = (raw, now + self._ttl)
         return raw
 
@@ -149,13 +157,22 @@ class DifyConsoleClient:
         http: httpx.AsyncClient,
         base_url: str,
         api_key: str,
+        tenant_id: str,
     ) -> list[dict[str, Any]]:
         url = f"{base_url.rstrip('/')}/console/api/apps"
         try:
             resp = await http.get(
                 url,
                 params={"limit": 100, "page": 1},
-                headers={"Authorization": f"Bearer {api_key}"},
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    # Path B' (INDEP-FIX-DEPLOY-2): Dify's ADMIN_API_KEY
+                    # bypass requires X-WORKSPACE-ID — ext_login.py:60
+                    # `if workspace_id:` is the entry guard. Without it
+                    # the request falls through to console JWT verify
+                    # and the admin key is rejected as "Invalid token".
+                    "X-WORKSPACE-ID": tenant_id,
+                },
             )
         except httpx.HTTPError as exc:
             log.warning("dify_console_client transport error: %s", exc)
