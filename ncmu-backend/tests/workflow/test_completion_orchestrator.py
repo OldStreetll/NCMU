@@ -270,3 +270,170 @@ async def test_dispatcher_dispatch_completion_yields_workflow_finished():
     assert out[0].event_type == "workflow_finished"
     assert out[0].run_id == run_id
     assert out[0].data.outputs.get("answer") == "翻译结果"
+
+
+# ===================================================================== #
+# TASK-B silent-drop tests (spec §3 D3 + plan §Phase 3)
+# ===================================================================== #
+
+
+class _StubDifyClient:
+    """Test stub for ``DifyStreamClient`` — yields pre-parsed Dify frames.
+
+    Duck-typed: orchestrators only call ``.stream(path, body)``, so the
+    stub bypasses HTTP / async-with / SSE-parse and exposes pure
+    orchestrator event-mapping behaviour to the assertions.
+    """
+
+    def __init__(self, frames, raise_at=None, raise_exc=None):
+        self._frames = list(frames)
+        self._raise_at = raise_at
+        self._raise_exc = raise_exc
+        self.calls: list[tuple[str, dict]] = []
+
+    async def stream(self, path, body):
+        self.calls.append((path, body))
+        for i, frame in enumerate(self._frames):
+            if self._raise_at is not None and i == self._raise_at:
+                raise self._raise_exc
+            yield frame
+        if (
+            self._raise_at is not None
+            and self._raise_at >= len(self._frames)
+        ):
+            raise self._raise_exc
+
+
+def _run_inputs():
+    return uuid.uuid4(), "app-completion-test", uuid.uuid4(), {"query": "translate", "inputs": {}}
+
+
+# --------------------------------------------------------------------- #
+# C1 — unknown event silently skipped + finally fall-through emits 1
+# terminal envelope (plan §Phase 3 — completion 独有 text_chunk 事件覆盖)
+# --------------------------------------------------------------------- #
+async def test_c1_unknown_event_skipped_and_finally_emits_terminal():
+    # text_chunk exercises completion's chunk-accumulation path; future_event
+    # tests silent-skip. Neither emits a terminal → finally補发 1 envelope.
+    frames = [
+        {"event": "text_chunk", "data": {"text": "hi"}},
+        {"event": "future_event", "data": {}},
+    ]
+    stub = _StubDifyClient(frames)
+    orch = _make_orchestrator()
+    run_id, app_id, user_id, inputs = _run_inputs()
+    events = [ev async for ev in orch.run(stub, run_id, app_id, user_id, inputs)]
+
+    # 0 known-event terminals + 1 finally terminal = 1.
+    assert len(events) == 1, (
+        f"expected exactly 1 envelope (only finally補发); got "
+        f"{len(events)}: {[e.event_type for e in events]}"
+    )
+    terminal = events[0]
+    assert terminal.event_type == "workflow_finished"
+    assert isinstance(terminal.data, WorkflowFinishedData)
+    assert terminal.data.status == "exception"
+    assert terminal.data.error == "Upstream stream closed without terminal event"
+    # accumulated_text from text_chunk preserved into outputs.
+    assert terminal.data.outputs.get("answer") == "hi"
+
+
+# --------------------------------------------------------------------- #
+# C2 — Dify event:error → exactly 1 workflow_finished(failed)
+# --------------------------------------------------------------------- #
+async def test_c2_dify_event_error_yields_failed_terminal():
+    frames = [
+        {
+            "event": "error",
+            "code": "invalid_param",
+            "status": 400,
+            "message": "max_tokens too large",
+        }
+    ]
+    stub = _StubDifyClient(frames)
+    orch = _make_orchestrator()
+    run_id, app_id, user_id, inputs = _run_inputs()
+    events = [ev async for ev in orch.run(stub, run_id, app_id, user_id, inputs)]
+
+    assert len(events) == 1, (
+        f"expected exactly 1 envelope (error returns + finally skips); "
+        f"got {len(events)}: {[e.event_type for e in events]}"
+    )
+    terminal = events[0]
+    assert terminal.event_type == "workflow_finished"
+    assert isinstance(terminal.data, WorkflowFinishedData)
+    assert terminal.data.status == "failed"
+    assert "invalid_param" in terminal.data.error
+    assert "max_tokens too large" in terminal.data.error
+
+
+# --------------------------------------------------------------------- #
+# C3 — upstream httpx.RequestError after some accumulation → exception terminal
+# carries accumulated answer
+# --------------------------------------------------------------------- #
+async def test_c3_upstream_exception_yields_exception_terminal():
+    import httpx
+
+    # Frames accumulate "翻译" + "结" (no terminal yet) → raise → except
+    # yields exception terminal with outputs.answer == "翻译结".
+    frames = [
+        {"event": "message", "answer": "翻译"},
+        {"event": "text_chunk", "data": {"text": "结"}},
+    ]
+    stub = _StubDifyClient(
+        frames,
+        raise_at=len(frames),
+        raise_exc=httpx.RequestError("upstream lost"),
+    )
+    orch = _make_orchestrator()
+    run_id, app_id, user_id, inputs = _run_inputs()
+    events = [ev async for ev in orch.run(stub, run_id, app_id, user_id, inputs)]
+
+    # 0 normal yields (message + text_chunk only accumulate) + 1 exception terminal.
+    assert len(events) == 1, (
+        f"expected exactly 1 exception terminal; got "
+        f"{len(events)}: {[e.event_type for e in events]}"
+    )
+    terminal = events[0]
+    assert terminal.event_type == "workflow_finished"
+    assert isinstance(terminal.data, WorkflowFinishedData)
+    assert terminal.data.status == "exception"
+    assert "RequestError" in terminal.data.error
+    assert "upstream lost" in terminal.data.error
+    # accumulated_text from both frames preserved.
+    assert terminal.data.outputs.get("answer") == "翻译结"
+
+
+# --------------------------------------------------------------------- #
+# C5 — REWORK-INDEP-I-1: CancelledError must NOT yield a finally envelope
+# (regression-lock for the cancelled sentinel; see test_advanced_chat C5).
+# --------------------------------------------------------------------- #
+async def test_c5_cancelled_error_does_not_yield_extra_envelope():
+    import asyncio
+
+    # Completion has no envelope-yielding events except message_end /
+    # workflow_finished / event:error — message + text_chunk accumulate
+    # only. So 1 message frame yields 0 envelopes, then CancelledError
+    # on the 2nd iteration. Without the ``not cancelled`` guard, finally
+    # would yield 1 stray workflow_finished(exception) and swallow the
+    # CancelledError; with the fix, events stay empty AND CancelledError
+    # propagates to the caller.
+    frames = [{"event": "message", "answer": "x"}]
+    stub = _StubDifyClient(
+        frames,
+        raise_at=len(frames),
+        raise_exc=asyncio.CancelledError(),
+    )
+    orch = _make_orchestrator()
+    run_id, app_id, user_id, inputs = _run_inputs()
+
+    events = []
+    with pytest.raises(asyncio.CancelledError):
+        async for ev in orch.run(stub, run_id, app_id, user_id, inputs):
+            events.append(ev)
+
+    assert len(events) == 0, (
+        f"REWORK-INDEP-I-1: finally must NOT yield on cancellation path; "
+        f"expected 0 envelopes (completion has no non-terminal yields); "
+        f"got {len(events)}: {[e.event_type for e in events]}"
+    )

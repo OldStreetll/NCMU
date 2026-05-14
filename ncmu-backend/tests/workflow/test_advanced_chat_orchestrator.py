@@ -299,3 +299,277 @@ async def test_dispatcher_registers_and_dispatches_advanced_chat():
     )
     # Sanity: the run_id we passed in is what the orchestrator stamps.
     assert all(ev.run_id == run_id for ev in events)
+
+
+# ===================================================================== #
+# TASK-B silent-drop tests (spec §3 D3 + plan §Phase 1)
+# ===================================================================== #
+# Stub DifyStreamClient subclass: bypasses real HTTP — orchestrator calls
+# stub.stream() directly and gets pre-parsed dicts. ``raise_at`` controls
+# when (and whether) the stream raises:
+#   raise_at = None         → never raise (regular yield)
+#   raise_at = N < len      → yield frames[0..N-1], then raise (mid-stream)
+#   raise_at >= len(frames) → yield all frames, then raise (late exception)
+# ===================================================================== #
+
+
+class _StubDifyClient:
+    """Test stub for ``DifyStreamClient`` — yields pre-parsed Dify frames.
+
+    Not a subclass: orchestrators only call ``.stream(path, body)``, so
+    duck-typing keeps the stub independent of DifyStreamClient ``__init__``
+    requirements. The stub bypasses every HTTP / async-with / SSE-parse
+    code path; the test surface is pure orchestrator event mapping.
+    """
+
+    def __init__(self, frames, raise_at=None, raise_exc=None):
+        self._frames = list(frames)
+        self._raise_at = raise_at
+        self._raise_exc = raise_exc
+        self.calls: list[tuple[str, dict]] = []
+
+    async def stream(self, path, body):
+        self.calls.append((path, body))
+        for i, frame in enumerate(self._frames):
+            if self._raise_at is not None and i == self._raise_at:
+                raise self._raise_exc
+            yield frame
+        if (
+            self._raise_at is not None
+            and self._raise_at >= len(self._frames)
+        ):
+            raise self._raise_exc
+
+
+def _load_fixture_frames() -> list[dict]:
+    """Parse the JSONL fixture file once and return a list of dicts."""
+    return [
+        json.loads(line)
+        for line in FIXTURE_PATH.read_text().splitlines()
+        if line.strip()
+    ]
+
+
+# --------------------------------------------------------------------- #
+# C1 — unknown event silently skipped + finally fall-through emits 1
+# terminal envelope (plan §Phase 1 1.2 C1)
+# --------------------------------------------------------------------- #
+async def test_c1_unknown_event_skipped_and_finally_emits_terminal():
+    from ncmu_backend.schemas.sse_events import WorkflowFinishedData
+
+    frames = [
+        {
+            "event": "node_started",
+            "task_id": "t1",
+            "workflow_run_id": "r1",
+            "data": {
+                "id": "e1",
+                "node_id": "start_1",
+                "node_type": "start",
+                "title": "开始",
+                "inputs": None,
+            },
+        },
+        # Unknown event — must be silent-skipped (no envelope yielded).
+        {"event": "future_event", "task_id": "t1", "data": {}},
+        {
+            "event": "node_finished",
+            "task_id": "t1",
+            "workflow_run_id": "r1",
+            "data": {
+                "id": "e2",
+                "node_id": "start_1",
+                "node_type": "start",
+                "status": "succeeded",
+                "elapsed_time": 12,
+                "outputs": None,
+            },
+        },
+    ]
+    stub = _StubDifyClient(frames)
+    orch = _make_orchestrator()
+    run_id, app_id, user_id, inputs = _run_inputs()
+    events = [ev async for ev in orch.run(stub, run_id, app_id, user_id, inputs)]
+
+    # 2 known events mapped + 1 finally terminal (no upstream workflow_finished).
+    assert len(events) == 3, (
+        f"expected 2 known events + 1 finally terminal = 3; got "
+        f"{len(events)}: {[e.event_type for e in events]}"
+    )
+    assert [e.event_type for e in events] == [
+        "node_started",
+        "node_finished",
+        "workflow_finished",
+    ]
+    terminal = events[-1]
+    assert isinstance(terminal.data, WorkflowFinishedData)
+    assert terminal.data.status == "exception"
+    assert terminal.data.error == "Upstream stream closed without terminal event"
+
+
+# --------------------------------------------------------------------- #
+# C2 — Dify event:error → exactly 1 workflow_finished(failed) (plan §1.2 C2)
+# --------------------------------------------------------------------- #
+async def test_c2_dify_event_error_yields_failed_terminal():
+    from ncmu_backend.schemas.sse_events import WorkflowFinishedData
+
+    # dify-sse-error-frame-contract §1.1: error frame fields are top-level
+    # (NOT data-nested) — code is string, status is int, message is string.
+    frames = [
+        {
+            "event": "error",
+            "code": "invalid_param",
+            "status": 400,
+            "message": "max_tokens too large",
+        }
+    ]
+    stub = _StubDifyClient(frames)
+    orch = _make_orchestrator()
+    run_id, app_id, user_id, inputs = _run_inputs()
+    events = [ev async for ev in orch.run(stub, run_id, app_id, user_id, inputs)]
+
+    assert len(events) == 1, (
+        f"expected exactly 1 envelope (error branch returns + finally "
+        f"skips because emitted_terminal=True); got {len(events)}: "
+        f"{[e.event_type for e in events]}"
+    )
+    terminal = events[0]
+    assert terminal.event_type == "workflow_finished"
+    assert isinstance(terminal.data, WorkflowFinishedData)
+    # AC#5: status literal "failed" (==, not in / startswith).
+    assert terminal.data.status == "failed"
+    # error string must carry both Dify code AND message for diagnosis.
+    assert "invalid_param" in terminal.data.error
+    assert "max_tokens too large" in terminal.data.error
+
+
+# --------------------------------------------------------------------- #
+# C3 — upstream httpx.RequestError mid-stream → finally補 exception terminal
+# (plan §1.2 C3)
+# --------------------------------------------------------------------- #
+async def test_c3_upstream_exception_yields_exception_terminal():
+    import httpx
+
+    from ncmu_backend.schemas.sse_events import WorkflowFinishedData
+
+    # Take first 3 frames of the fixture (2 node_started + 1 node_finished
+    # mid-pair — orchestrator yields 3 normal envelopes), then raise.
+    all_frames = _load_fixture_frames()
+    head_frames = all_frames[:3]  # node_started, node_finished, node_started
+    stub = _StubDifyClient(
+        head_frames,
+        raise_at=len(head_frames),  # raise after yielding all 3
+        raise_exc=httpx.RequestError("upstream lost"),
+    )
+    orch = _make_orchestrator()
+    run_id, app_id, user_id, inputs = _run_inputs()
+    events = [ev async for ev in orch.run(stub, run_id, app_id, user_id, inputs)]
+
+    # 3 normal events + 1 exception terminal = 4.
+    assert len(events) == 4, (
+        f"expected 3 normal + 1 exception terminal = 4; got "
+        f"{len(events)}: {[e.event_type for e in events]}"
+    )
+    # First 3 are the normal node events from the fixture.
+    assert [e.event_type for e in events[:3]] == [
+        "node_started",
+        "node_finished",
+        "node_started",
+    ]
+    terminal = events[-1]
+    assert terminal.event_type == "workflow_finished"
+    assert isinstance(terminal.data, WorkflowFinishedData)
+    # AC#5: status literal "exception" (== — not "failed" which is for event:error).
+    assert terminal.data.status == "exception"
+    # error string must carry exception type name + message.
+    assert "RequestError" in terminal.data.error
+    assert "upstream lost" in terminal.data.error
+
+
+# --------------------------------------------------------------------- #
+# C4 — double-emit guard: late exception AFTER terminal envelope ≠ extra yield
+# (spec §AC#4 — dedicated test on this orchestrator only)
+# --------------------------------------------------------------------- #
+async def test_c4_double_emit_guard_after_workflow_finished():
+    from ncmu_backend.schemas.sse_events import WorkflowFinishedData
+
+    # Full 7-frame fixture (terminates with workflow_finished → sets
+    # emitted_terminal=True), then raise — the except-block must check
+    # emitted_terminal and SKIP yielding (no double terminal envelope).
+    all_frames = _load_fixture_frames()
+    stub = _StubDifyClient(
+        all_frames,
+        raise_at=len(all_frames),  # raise after all 7 frames yielded
+        raise_exc=RuntimeError("late error"),
+    )
+    orch = _make_orchestrator()
+    run_id, app_id, user_id, inputs = _run_inputs()
+    events = [ev async for ev in orch.run(stub, run_id, app_id, user_id, inputs)]
+
+    # Fixture yields: node_started, node_finished, node_started,
+    # node_finished, workflow_finished (5 NCMU events — message +
+    # message_end accumulate silently). Late RuntimeError must NOT
+    # produce a 6th envelope.
+    assert len(events) == 5, (
+        f"AC#4 double-emit guard: expected exactly 5 envelopes (no extra "
+        f"after late RuntimeError); got {len(events)}: "
+        f"{[e.event_type for e in events]}"
+    )
+    terminal = events[-1]
+    assert terminal.event_type == "workflow_finished"
+    assert isinstance(terminal.data, WorkflowFinishedData)
+    # The terminal stays "succeeded" — late exception did NOT downgrade it.
+    assert terminal.data.status == "succeeded"
+    # F-NEW-1: accumulated message answer merged in.
+    assert terminal.data.outputs.get("answer") == "hello"
+
+
+# --------------------------------------------------------------------- #
+# C5 — REWORK-INDEP-I-1: CancelledError must NOT yield a finally envelope
+# and must propagate cleanly (regression-lock for the cancelled sentinel).
+#
+# Without the ``not cancelled`` guard in finally, two bugs trigger together:
+#   (1) consumer receives a stray ``workflow_finished(exception)`` envelope
+#       — routes.py would then write a misleading finalize_run("exception")
+#       to the DB on a path that was simply client disconnect.
+#   (2) the yield in finally suppresses the in-flight CancelledError, so it
+#       never surfaces to the caller — pytest.raises would NOT trigger.
+# This test asserts both fixes in one shot.
+# --------------------------------------------------------------------- #
+async def test_c5_cancelled_error_does_not_yield_extra_envelope():
+    import asyncio
+
+    # First 2 frames yield 2 normal NCMU envelopes; then stub raises
+    # asyncio.CancelledError on the 3rd iteration — the orchestrator's
+    # ``except CancelledError`` sets the sentinel and re-raises, ``finally``
+    # checks ``not cancelled`` and skips its catch-all yield.
+    head = _load_fixture_frames()[:2]
+    stub = _StubDifyClient(
+        head,
+        raise_at=len(head),
+        raise_exc=asyncio.CancelledError(),
+    )
+    orch = _make_orchestrator()
+    run_id, app_id, user_id, inputs = _run_inputs()
+
+    events = []
+    with pytest.raises(asyncio.CancelledError):
+        async for ev in orch.run(stub, run_id, app_id, user_id, inputs):
+            events.append(ev)
+
+    # AC-REWORK#3 — exactly 2 envelopes (the 2 normal node events); no
+    # finally補发. If the guard were missing, len(events) would be 3 AND
+    # the pytest.raises block would never fire (CancelledError suppressed).
+    assert len(events) == 2, (
+        f"REWORK-INDEP-I-1: finally must NOT yield on cancellation path; "
+        f"expected exactly 2 normal envelopes; got {len(events)}: "
+        f"{[e.event_type for e in events]}"
+    )
+    assert [e.event_type for e in events] == ["node_started", "node_finished"]
+    # No exception/failed terminal leaked into the stream.
+    for ev in events:
+        if ev.event_type == "workflow_finished":
+            assert ev.data.status == "succeeded", (
+                "no exception/failed terminal should reach the consumer "
+                "on the CancelledError path"
+            )

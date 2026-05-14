@@ -242,3 +242,208 @@ async def test_dispatcher_routes_agent_chat_mode():
     assert types.count("agent_thought") == 2
     assert types.count("tool_call") == 2
     assert types.count("workflow_finished") == 1
+
+
+# ===================================================================== #
+# TASK-B silent-drop tests (spec §3 D3 + plan §Phase 2)
+# ===================================================================== #
+
+
+class _StubDifyClient:
+    """Test stub for ``DifyStreamClient`` — yields pre-parsed Dify frames.
+
+    Duck-typed: orchestrators only call ``.stream(path, body)``, so the
+    stub bypasses HTTP / async-with / SSE-parse and exposes pure
+    orchestrator event-mapping behaviour to the assertions.
+    """
+
+    def __init__(self, frames, raise_at=None, raise_exc=None):
+        self._frames = list(frames)
+        self._raise_at = raise_at
+        self._raise_exc = raise_exc
+        self.calls: list[tuple[str, dict]] = []
+
+    async def stream(self, path, body):
+        self.calls.append((path, body))
+        for i, frame in enumerate(self._frames):
+            if self._raise_at is not None and i == self._raise_at:
+                raise self._raise_exc
+            yield frame
+        if (
+            self._raise_at is not None
+            and self._raise_at >= len(self._frames)
+        ):
+            raise self._raise_exc
+
+
+def _load_fixture_frames() -> list[dict]:
+    return [
+        json.loads(line)
+        for line in _FIXTURE_PATH.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
+def _make_run_args():
+    return uuid.uuid4(), "app-agent-test", uuid.uuid4(), {
+        "query": "q",
+        "conversation_id": "",
+    }
+
+
+# --------------------------------------------------------------------- #
+# C1 — unknown event silently skipped + finally fall-through emits 1
+# terminal envelope (plan §Phase 2 — agent_chat 独有 event guard)
+# --------------------------------------------------------------------- #
+async def test_c1_unknown_event_skipped_and_finally_emits_terminal():
+    from ncmu_backend.schemas.sse_events import WorkflowFinishedData
+    from ncmu_backend.workflow.agent_chat import AgentChatOrchestrator
+
+    # agent_thought with tool=null → only 1 yield (no tool_call branch).
+    # future_event → silently skipped. message → accumulated, no yield.
+    frames = [
+        {
+            "event": "agent_thought",
+            "thought": "thinking",
+            "tool": None,
+            "tool_input": {},
+            "observation": None,
+        },
+        {"event": "future_event", "data": {}},
+        {"event": "message", "answer": "hi"},
+    ]
+    stub = _StubDifyClient(frames)
+    orch = AgentChatOrchestrator()
+    run_id, app_id, user_id, inputs = _make_run_args()
+    events = [ev async for ev in orch.run(stub, run_id, app_id, user_id, inputs)]
+
+    # 1 agent_thought (no tool_call because tool=None) + 1 finally terminal.
+    assert len(events) == 2, (
+        f"expected 1 agent_thought + 1 finally terminal = 2; got "
+        f"{len(events)}: {[e.event_type for e in events]}"
+    )
+    assert events[0].event_type == "agent_thought"
+    terminal = events[-1]
+    assert terminal.event_type == "workflow_finished"
+    assert isinstance(terminal.data, WorkflowFinishedData)
+    assert terminal.data.status == "exception"
+    assert terminal.data.error == "Upstream stream closed without terminal event"
+
+
+# --------------------------------------------------------------------- #
+# C2 — Dify event:error → exactly 1 workflow_finished(failed)
+# --------------------------------------------------------------------- #
+async def test_c2_dify_event_error_yields_failed_terminal():
+    from ncmu_backend.schemas.sse_events import WorkflowFinishedData
+    from ncmu_backend.workflow.agent_chat import AgentChatOrchestrator
+
+    frames = [
+        {
+            "event": "error",
+            "code": "invalid_param",
+            "status": 400,
+            "message": "max_tokens too large",
+        }
+    ]
+    stub = _StubDifyClient(frames)
+    orch = AgentChatOrchestrator()
+    run_id, app_id, user_id, inputs = _make_run_args()
+    events = [ev async for ev in orch.run(stub, run_id, app_id, user_id, inputs)]
+
+    assert len(events) == 1, (
+        f"expected exactly 1 envelope (error returns + finally skips); "
+        f"got {len(events)}: {[e.event_type for e in events]}"
+    )
+    terminal = events[0]
+    assert terminal.event_type == "workflow_finished"
+    assert isinstance(terminal.data, WorkflowFinishedData)
+    assert terminal.data.status == "failed"
+    assert "invalid_param" in terminal.data.error
+    assert "max_tokens too large" in terminal.data.error
+
+
+# --------------------------------------------------------------------- #
+# C3 — upstream httpx.RequestError mid-stream → finally補 exception terminal
+# --------------------------------------------------------------------- #
+async def test_c3_upstream_exception_yields_exception_terminal():
+    import httpx
+
+    from ncmu_backend.schemas.sse_events import WorkflowFinishedData
+    from ncmu_backend.workflow.agent_chat import AgentChatOrchestrator
+
+    # First 3 fixture frames: agent_thought (tool=web_search, obs=null) →
+    # 2 yields (agent_thought + tool_call calling); same for frame 2 with
+    # obs filled → 2 yields (agent_thought + tool_call completed); frame
+    # 3 is "message" → accumulated, no yield. Total = 4 normal yields.
+    head = _load_fixture_frames()[:3]
+    stub = _StubDifyClient(
+        head,
+        raise_at=len(head),
+        raise_exc=httpx.RequestError("upstream lost"),
+    )
+    orch = AgentChatOrchestrator()
+    run_id, app_id, user_id, inputs = _make_run_args()
+    events = [ev async for ev in orch.run(stub, run_id, app_id, user_id, inputs)]
+
+    # 4 normal envelopes + 1 exception terminal = 5.
+    assert len(events) == 5, (
+        f"expected 4 normal (2 agent_thought + 2 tool_call) + 1 "
+        f"exception terminal = 5; got {len(events)}: "
+        f"{[e.event_type for e in events]}"
+    )
+    assert [e.event_type for e in events[:4]] == [
+        "agent_thought",
+        "tool_call",
+        "agent_thought",
+        "tool_call",
+    ]
+    terminal = events[-1]
+    assert terminal.event_type == "workflow_finished"
+    assert isinstance(terminal.data, WorkflowFinishedData)
+    assert terminal.data.status == "exception"
+    assert "RequestError" in terminal.data.error
+    assert "upstream lost" in terminal.data.error
+    # accumulated_text from frame 3 ("根据搜索") merged into outputs.
+    assert terminal.data.outputs.get("answer") == "根据搜索"
+
+
+# --------------------------------------------------------------------- #
+# C5 — REWORK-INDEP-I-1: CancelledError must NOT yield a finally envelope
+# (regression-lock for the cancelled sentinel; see test_advanced_chat C5).
+# --------------------------------------------------------------------- #
+async def test_c5_cancelled_error_does_not_yield_extra_envelope():
+    import asyncio
+
+    from ncmu_backend.workflow.agent_chat import AgentChatOrchestrator
+
+    # First 2 fixture frames: 2 agent_thought (each → agent_thought +
+    # tool_call) = 4 normal envelopes; then CancelledError on 3rd iter.
+    head = _load_fixture_frames()[:2]
+    stub = _StubDifyClient(
+        head,
+        raise_at=len(head),
+        raise_exc=asyncio.CancelledError(),
+    )
+    orch = AgentChatOrchestrator()
+    run_id, app_id, user_id, inputs = _make_run_args()
+
+    events = []
+    with pytest.raises(asyncio.CancelledError):
+        async for ev in orch.run(stub, run_id, app_id, user_id, inputs):
+            events.append(ev)
+
+    # Exactly 4 normal envelopes; no finally補发.
+    assert len(events) == 4, (
+        f"REWORK-INDEP-I-1: finally must NOT yield on cancellation path; "
+        f"expected 4 normal envelopes; got {len(events)}: "
+        f"{[e.event_type for e in events]}"
+    )
+    assert [e.event_type for e in events] == [
+        "agent_thought",
+        "tool_call",
+        "agent_thought",
+        "tool_call",
+    ]
+    # No exception/failed workflow_finished envelope leaked.
+    for ev in events:
+        assert ev.event_type != "workflow_finished"
