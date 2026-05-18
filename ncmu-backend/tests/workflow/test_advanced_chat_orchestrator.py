@@ -573,3 +573,98 @@ async def test_c5_cancelled_error_does_not_yield_extra_envelope():
                 "no exception/failed terminal should reach the consumer "
                 "on the CancelledError path"
             )
+
+
+# ===================================================================== #
+# TASK-D timeout + units tests (B-NEW-41 + B-NEW-42 / plan §AC#5)
+# ===================================================================== #
+
+
+async def test_d_timeout_exception_emits_status_timeout():
+    """B-NEW-41 — httpx.TimeoutException → workflow_finished(status='timeout').
+
+    Explicit timeout branch (placed between asyncio.CancelledError and the
+    generic Exception handler) translates upstream timeouts into a dedicated
+    status='timeout' envelope; aligns with main.py boot-sweeper's
+    finalize_run(status='timeout') for the late-finalize path.
+    """
+    import httpx
+
+    stub = _StubDifyClient(
+        [],
+        raise_at=0,
+        raise_exc=httpx.TimeoutException("read timeout"),
+    )
+    orch = _make_orchestrator()
+    run_id, app_id, user_id, inputs = _run_inputs()
+    events = [ev async for ev in orch.run(stub, run_id, app_id, user_id, inputs)]
+
+    assert len(events) == 1, (
+        f"expected exactly 1 timeout terminal envelope; got {len(events)}: "
+        f"{[e.event_type for e in events]}"
+    )
+    assert events[0].event_type == "workflow_finished"
+    assert events[0].data.status == "timeout", (
+        f"B-NEW-41: timeout branch must emit status='timeout' (not "
+        f"'exception'); got {events[0].data.status!r}"
+    )
+    assert events[0].data.error != "", (
+        f"timeout terminal must carry a non-empty error string; got "
+        f"{events[0].data.error!r}"
+    )
+    assert "upstream timeout" in events[0].data.error, (
+        f"timeout error string must literally contain 'upstream timeout'; "
+        f"got {events[0].data.error!r}"
+    )
+
+
+async def test_d_elapsed_time_multiplied_by_1000():
+    """B-NEW-42 — data.elapsed_time (seconds) → total_elapsed_ms (ms) × 1000.
+
+    Dify v1.13.x WorkflowFinishStreamResponse emits elapsed_time as float
+    seconds (task_entities.py LLMUsage.latency: float). The NCMU schema
+    retains the ``_ms`` suffix for SPA back-compat; the orchestrator now
+    multiplies by 1000 at the boundary. None remains None.
+    """
+    from ncmu_backend.schemas.sse_events import WorkflowFinishedData
+
+    # Case 1: real seconds value → int(× 1000)
+    frames = [
+        {
+            "event": "workflow_finished",
+            "task_id": "t1",
+            "workflow_run_id": "r1",
+            "data": {"status": "succeeded", "elapsed_time": 1.2286, "outputs": {}},
+        }
+    ]
+    stub = _StubDifyClient(frames)
+    orch = _make_orchestrator()
+    run_id, app_id, user_id, inputs = _run_inputs()
+    events = [ev async for ev in orch.run(stub, run_id, app_id, user_id, inputs)]
+    final = events[-1]
+    assert final.event_type == "workflow_finished"
+    assert isinstance(final.data, WorkflowFinishedData)
+    assert final.data.total_elapsed_ms == 1228, (
+        f"B-NEW-42: elapsed_time 1.2286s × 1000 truncated to int = 1228; "
+        f"got {final.data.total_elapsed_ms!r}"
+    )
+
+    # Case 2: elapsed_time missing → None
+    frames_none = [
+        {
+            "event": "workflow_finished",
+            "task_id": "t1",
+            "workflow_run_id": "r1",
+            "data": {"status": "succeeded", "outputs": {}},
+        }
+    ]
+    stub_none = _StubDifyClient(frames_none)
+    events_none = [
+        ev async for ev in orch.run(stub_none, run_id, app_id, user_id, inputs)
+    ]
+    final_none = events_none[-1]
+    assert isinstance(final_none.data, WorkflowFinishedData)
+    assert final_none.data.total_elapsed_ms is None, (
+        f"B-NEW-42: missing elapsed_time must yield None (not 0); got "
+        f"{final_none.data.total_elapsed_ms!r}"
+    )

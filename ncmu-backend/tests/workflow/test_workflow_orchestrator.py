@@ -460,3 +460,118 @@ async def test_c5_cancelled_error_does_not_yield_extra_envelope(
     # No exception/failed terminal leaked.
     for ev in events:
         assert ev.event_type != "workflow_finished"
+
+
+# ===================================================================== #
+# TASK-D timeout + units tests (B-NEW-41 + B-NEW-42 / plan §AC#5)
+# ===================================================================== #
+
+
+async def test_d_timeout_exception_emits_status_timeout(
+    run_kwargs: dict[str, Any],
+) -> None:
+    """B-NEW-41 — httpx.TimeoutException → workflow_finished(status='timeout').
+
+    Explicit timeout branch (placed between asyncio.CancelledError and the
+    generic Exception handler) translates upstream timeouts into a dedicated
+    status='timeout' envelope; aligns with main.py boot-sweeper's
+    finalize_run(status='timeout') for the late-finalize path.
+    """
+    import httpx
+
+    stub = _StubDifyClient(
+        [],
+        raise_at=0,
+        raise_exc=httpx.TimeoutException("read timeout"),
+    )
+    orch = WorkflowOrchestrator()
+    events = [ev async for ev in orch.run(stub, **run_kwargs)]
+
+    assert len(events) == 1, (
+        f"expected exactly 1 timeout terminal envelope; got {len(events)}: "
+        f"{[e.event_type for e in events]}"
+    )
+    assert events[0].event_type == "workflow_finished"
+    assert events[0].data.status == "timeout", (
+        f"B-NEW-41: timeout branch must emit status='timeout' (not "
+        f"'exception'); got {events[0].data.status!r}"
+    )
+    assert events[0].data.error != "", (
+        f"timeout terminal must carry a non-empty error string; got "
+        f"{events[0].data.error!r}"
+    )
+    assert "upstream timeout" in events[0].data.error, (
+        f"timeout error string must literally contain 'upstream timeout'; "
+        f"got {events[0].data.error!r}"
+    )
+
+
+async def test_d_elapsed_time_multiplied_by_1000(
+    run_kwargs: dict[str, Any],
+) -> None:
+    """B-NEW-42 — data.elapsed_time (seconds) → total_elapsed_ms (ms) × 1000.
+
+    Dify v1.13.x ``/v1/workflows/run`` WorkflowFinishStreamResponse emits
+    elapsed_time as float seconds. NCMU schema retains ``_ms`` suffix for
+    SPA back-compat; orchestrator now multiplies by 1000 at the boundary.
+    None remains None.
+    """
+    # Case 1: real seconds value → int(× 1000)
+    frames = [
+        {
+            "event": "workflow_finished",
+            "data": {
+                "status": "succeeded",
+                "elapsed_time": 1.2286,
+                "outputs": {"result": "ok"},
+            },
+        }
+    ]
+    stub = _StubDifyClient(frames)
+    orch = WorkflowOrchestrator()
+    events = [ev async for ev in orch.run(stub, **run_kwargs)]
+    wf = events[-1]
+    assert wf.event_type == "workflow_finished"
+    assert isinstance(wf.data, WorkflowFinishedData)
+    assert wf.data.total_elapsed_ms == 1228, (
+        f"B-NEW-42: elapsed_time 1.2286s × 1000 truncated to int = 1228; "
+        f"got {wf.data.total_elapsed_ms!r}"
+    )
+
+    # Case 2: elapsed_time missing → None
+    frames_none = [
+        {
+            "event": "workflow_finished",
+            "data": {"status": "succeeded", "outputs": {}},
+        }
+    ]
+    stub_none = _StubDifyClient(frames_none)
+    events_none = [ev async for ev in orch.run(stub_none, **run_kwargs)]
+    wf_none = events_none[-1]
+    assert isinstance(wf_none.data, WorkflowFinishedData)
+    assert wf_none.data.total_elapsed_ms is None, (
+        f"B-NEW-42: missing elapsed_time must yield None (not 0); got "
+        f"{wf_none.data.total_elapsed_ms!r}"
+    )
+
+    # Bonus — node_finished.elapsed_ms also × 1000 (same source field):
+    frames_node = [
+        {
+            "event": "node_finished",
+            "data": {
+                "node_id": "http_1",
+                "node_type": "http_request",
+                "status": "succeeded",
+                "elapsed_time": 0.5,
+                "outputs": {"body": "ok"},
+            },
+        }
+    ]
+    stub_node = _StubDifyClient(frames_node)
+    events_node = [ev async for ev in orch.run(stub_node, **run_kwargs)]
+    node_finished = events_node[0]
+    assert node_finished.event_type == "node_finished"
+    assert node_finished.data.elapsed_ms == 500, (
+        f"B-NEW-42: node_finished elapsed_time 0.5s × 1000 = 500; got "
+        f"{node_finished.data.elapsed_ms!r}"
+    )

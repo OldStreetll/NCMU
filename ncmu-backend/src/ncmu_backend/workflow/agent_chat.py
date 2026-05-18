@@ -31,6 +31,8 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, AsyncIterator
 
+import httpx
+
 from ncmu_backend.schemas.sse_events import (
     AgentThoughtData,
     NcmuSseEvent,
@@ -124,6 +126,14 @@ class AgentChatOrchestrator(BaseOrchestrator):
                     emitted_terminal = True
                     return
                 elif event_name == "message_end":
+                    # TASK-D B-NEW-42: surface metadata.usage.latency × 1000.
+                    # Plan §AC#4 marks "(4 orchestrator)" uniformity — agent_chat
+                    # had no prior total_elapsed_ms assignment; Dify chat-messages
+                    # emits LLMUsage.latency (float seconds) on message_end,
+                    # mirroring completion.py's existing path. None stays None.
+                    _latency = (
+                        raw.get("metadata", {}).get("usage", {}).get("latency")
+                    )
                     yield NcmuSseEvent(
                         event_type="workflow_finished",
                         run_id=run_id,
@@ -131,6 +141,11 @@ class AgentChatOrchestrator(BaseOrchestrator):
                         data=WorkflowFinishedData(
                             status="succeeded",
                             outputs={"answer": accumulated_text},
+                            total_elapsed_ms=(
+                                int(_latency * 1000)
+                                if _latency is not None
+                                else None
+                            ),
                         ),
                     )
                     emitted_terminal = True
@@ -140,6 +155,25 @@ class AgentChatOrchestrator(BaseOrchestrator):
             # see advanced_chat.py for the full rationale.
             cancelled = True
             raise
+        except httpx.TimeoutException as exc:
+            # TASK-D B-NEW-41: explicit timeout bucket — see advanced_chat.py
+            # for the full rationale.
+            if not emitted_terminal:
+                yield NcmuSseEvent(
+                    event_type="workflow_finished",
+                    run_id=run_id,
+                    timestamp=datetime.now(timezone.utc),
+                    data=WorkflowFinishedData(
+                        status="timeout",
+                        outputs={"answer": accumulated_text} if accumulated_text else {},
+                        error=(
+                            f"upstream timeout: {exc!r}"
+                            if str(exc)
+                            else "upstream timeout"
+                        ),
+                    ),
+                )
+                emitted_terminal = True
         except Exception as exc:
             # TASK-B: any Python runtime exception → emit terminal envelope.
             if not emitted_terminal:

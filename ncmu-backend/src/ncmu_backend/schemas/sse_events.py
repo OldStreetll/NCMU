@@ -117,7 +117,7 @@ class WorkflowFinishedData(BaseModel):
     (Dify ``task_entities.py:810`` ``WorkflowFinishStreamResponse``).
     """
 
-    status: Literal["succeeded", "failed", "stopped", "exception"]
+    status: Literal["succeeded", "failed", "stopped", "exception", "timeout"]
     outputs: dict[str, Any] = Field(default_factory=dict)
     total_elapsed_ms: float | None = None
     error: str | None = None

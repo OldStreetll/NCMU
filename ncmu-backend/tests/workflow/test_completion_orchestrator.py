@@ -230,9 +230,10 @@ async def test_completion_uses_completion_messages_endpoint():
 # (f) AC#3(f) — text_chunk path standalone, no message frames
 # --------------------------------------------------------------------- #
 async def test_completion_text_chunk_path_alone_accumulates():
+    # TASK-D B-NEW-42 (Path B): fixture latency in seconds — × 1000 = 99.
     _FakeAsyncClient.LINES = [
         'data: {"event":"text_chunk","data":{"text":"hi"}}',
-        'data: {"event":"message_end","metadata":{"usage":{"latency":99}}}',
+        'data: {"event":"message_end","metadata":{"usage":{"latency":0.099}}}',
     ]
     orch = _make_orchestrator()
     out = [
@@ -436,4 +437,92 @@ async def test_c5_cancelled_error_does_not_yield_extra_envelope():
         f"REWORK-INDEP-I-1: finally must NOT yield on cancellation path; "
         f"expected 0 envelopes (completion has no non-terminal yields); "
         f"got {len(events)}: {[e.event_type for e in events]}"
+    )
+
+
+# ===================================================================== #
+# TASK-D timeout + units tests (B-NEW-41 + B-NEW-42 / plan §AC#5)
+# ===================================================================== #
+
+
+async def test_d_timeout_exception_emits_status_timeout():
+    """B-NEW-41 — httpx.TimeoutException → workflow_finished(status='timeout').
+
+    Explicit timeout branch (placed between asyncio.CancelledError and
+    the generic Exception handler) translates upstream timeouts into a
+    dedicated status='timeout' envelope instead of the generic
+    'exception' bucket — aligns with main.py boot-sweeper's
+    finalize_run(status='timeout') path.
+    """
+    import httpx
+
+    stub = _StubDifyClient(
+        [],
+        raise_at=0,
+        raise_exc=httpx.TimeoutException("read timeout"),
+    )
+    orch = _make_orchestrator()
+    run_id, app_id, user_id, inputs = _run_inputs()
+    events = [ev async for ev in orch.run(stub, run_id, app_id, user_id, inputs)]
+
+    # (a) exactly 1 envelope — the timeout terminal
+    assert len(events) == 1, (
+        f"expected exactly 1 timeout terminal envelope; got {len(events)}: "
+        f"{[e.event_type for e in events]}"
+    )
+    # (b) event_type
+    assert events[0].event_type == "workflow_finished"
+    # (c) status literal "timeout" (==, not in/startswith) — 守
+    # feedback_pre_existing_error_strict_validation 字段级断言纪律
+    assert events[0].data.status == "timeout", (
+        f"B-NEW-41: timeout branch must emit status='timeout' (not "
+        f"'exception'); got {events[0].data.status!r}"
+    )
+    # (d) error field non-empty
+    assert events[0].data.error != "", (
+        f"timeout terminal must carry a non-empty error string; got "
+        f"{events[0].data.error!r}"
+    )
+    # (e) error string literally contains 'upstream timeout'
+    assert "upstream timeout" in events[0].data.error, (
+        f"timeout error string must literally contain 'upstream timeout' "
+        f"for human readability; got {events[0].data.error!r}"
+    )
+
+
+async def test_d_elapsed_time_multiplied_by_1000():
+    """B-NEW-42 — metadata.usage.latency (seconds) → total_elapsed_ms (ms) × 1000.
+
+    Dify v1.13.x emits LLMUsage.latency in seconds (float). The NCMU
+    schema retains the ``_ms`` suffix for SPA back-compat; the
+    orchestrator now multiplies by 1000 at the boundary so the value
+    matches the field name. None remains None (no implicit 0 coercion).
+    """
+    # Case 1: real seconds value → int(× 1000)
+    frames = [
+        {
+            "event": "message_end",
+            "metadata": {"usage": {"latency": 1.2286}},
+        }
+    ]
+    stub = _StubDifyClient(frames)
+    orch = _make_orchestrator()
+    run_id, app_id, user_id, inputs = _run_inputs()
+    events = [ev async for ev in orch.run(stub, run_id, app_id, user_id, inputs)]
+    assert len(events) == 1
+    assert events[0].data.total_elapsed_ms == 1228, (
+        f"B-NEW-42: latency 1.2286s × 1000 truncated to int = 1228; got "
+        f"{events[0].data.total_elapsed_ms!r}"
+    )
+
+    # Case 2: latency missing → None (no implicit 0)
+    frames_none = [{"event": "message_end"}]
+    stub_none = _StubDifyClient(frames_none)
+    events_none = [
+        ev async for ev in orch.run(stub_none, run_id, app_id, user_id, inputs)
+    ]
+    assert len(events_none) == 1
+    assert events_none[0].data.total_elapsed_ms is None, (
+        f"B-NEW-42: missing latency must yield None (not 0); got "
+        f"{events_none[0].data.total_elapsed_ms!r}"
     )

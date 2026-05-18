@@ -39,6 +39,8 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, AsyncIterator
 
+import httpx
+
 from ncmu_backend.schemas.sse_events import (
     NcmuSseEvent,
     NodeFinishedData,
@@ -98,6 +100,9 @@ class AdvancedChatOrchestrator(BaseOrchestrator):
                         ),
                     )
                 elif event_name == "node_finished":
+                    # TASK-D B-NEW-42: data.elapsed_time is float seconds;
+                    # convert to ms at the boundary. None stays None.
+                    _et = data.get("elapsed_time")
                     yield NcmuSseEvent(
                         event_type="node_finished",
                         run_id=run_id,
@@ -112,7 +117,7 @@ class AdvancedChatOrchestrator(BaseOrchestrator):
                             # ``.get(..., {})`` only catches MISSING key; explicit
                             # null still returns ``None`` → schema would reject.
                             outputs=data.get("outputs") or {},
-                            elapsed_ms=data.get("elapsed_time"),
+                            elapsed_ms=int(_et * 1000) if _et is not None else None,
                             error=data.get("error"),
                         ),
                     )
@@ -146,6 +151,9 @@ class AdvancedChatOrchestrator(BaseOrchestrator):
                     merged_outputs = dict(data.get("outputs") or {})
                     if accumulated_answer:
                         merged_outputs.setdefault("answer", accumulated_answer)
+                    # TASK-D B-NEW-42: data.elapsed_time is float seconds;
+                    # convert to ms at the boundary. None stays None.
+                    _et = data.get("elapsed_time")
                     yield NcmuSseEvent(
                         event_type="workflow_finished",
                         run_id=run_id,
@@ -153,7 +161,9 @@ class AdvancedChatOrchestrator(BaseOrchestrator):
                         data=WorkflowFinishedData(
                             status=data.get("status", "succeeded"),
                             outputs=merged_outputs,
-                            total_elapsed_ms=data.get("elapsed_time"),
+                            total_elapsed_ms=(
+                                int(_et * 1000) if _et is not None else None
+                            ),
                             error=data.get("error"),
                         ),
                     )
@@ -169,6 +179,31 @@ class AdvancedChatOrchestrator(BaseOrchestrator):
             # suppresses the in-flight exception). Re-raise BELOW the assignment.
             cancelled = True
             raise
+        except httpx.TimeoutException as exc:
+            # TASK-D B-NEW-41: explicit timeout bucket — placed BEFORE the
+            # generic ``except Exception`` so timeouts route to a dedicated
+            # status='timeout' envelope (aligns with main.py boot-sweeper's
+            # finalize_run('timeout') path). httpx.TimeoutException is the
+            # base class for ConnectTimeout / ReadTimeout / WriteTimeout /
+            # PoolTimeout — single clause captures all four. Body shape
+            # mirrors ``except Exception`` (no re-raise) so the consumer's
+            # ``async for`` ends cleanly after receiving the terminal.
+            if not emitted_terminal:
+                yield NcmuSseEvent(
+                    event_type="workflow_finished",
+                    run_id=run_id,
+                    timestamp=datetime.now(timezone.utc),
+                    data=WorkflowFinishedData(
+                        status="timeout",
+                        outputs={"answer": accumulated_answer} if accumulated_answer else {},
+                        error=(
+                            f"upstream timeout: {exc!r}"
+                            if str(exc)
+                            else "upstream timeout"
+                        ),
+                    ),
+                )
+                emitted_terminal = True
         except Exception as exc:
             # TASK-B: any Python runtime exception (httpx.RequestError /
             # pydantic ValidationError / KeyError / etc.) → emit a terminal

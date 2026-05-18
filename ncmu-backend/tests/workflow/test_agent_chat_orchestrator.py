@@ -447,3 +447,99 @@ async def test_c5_cancelled_error_does_not_yield_extra_envelope():
     # No exception/failed workflow_finished envelope leaked.
     for ev in events:
         assert ev.event_type != "workflow_finished"
+
+
+# ===================================================================== #
+# TASK-D timeout + units tests (B-NEW-41 + B-NEW-42 / plan §AC#5)
+# ===================================================================== #
+
+
+async def test_d_timeout_exception_emits_status_timeout():
+    """B-NEW-41 — httpx.TimeoutException → workflow_finished(status='timeout').
+
+    Explicit timeout branch (placed between asyncio.CancelledError and the
+    generic Exception handler) translates upstream timeouts into a dedicated
+    status='timeout' envelope; aligns with main.py boot-sweeper's
+    finalize_run(status='timeout') for the late-finalize path.
+    """
+    import httpx
+
+    from ncmu_backend.workflow.agent_chat import AgentChatOrchestrator
+
+    stub = _StubDifyClient(
+        [],
+        raise_at=0,
+        raise_exc=httpx.TimeoutException("read timeout"),
+    )
+    orch = AgentChatOrchestrator()
+    run_id, app_id, user_id, inputs = _make_run_args()
+    events = [ev async for ev in orch.run(stub, run_id, app_id, user_id, inputs)]
+
+    assert len(events) == 1, (
+        f"expected exactly 1 timeout terminal envelope; got {len(events)}: "
+        f"{[e.event_type for e in events]}"
+    )
+    assert events[0].event_type == "workflow_finished"
+    assert events[0].data.status == "timeout", (
+        f"B-NEW-41: timeout branch must emit status='timeout' (not "
+        f"'exception'); got {events[0].data.status!r}"
+    )
+    assert events[0].data.error != "", (
+        f"timeout terminal must carry a non-empty error string; got "
+        f"{events[0].data.error!r}"
+    )
+    assert "upstream timeout" in events[0].data.error, (
+        f"timeout error string must literally contain 'upstream timeout'; "
+        f"got {events[0].data.error!r}"
+    )
+
+
+async def test_d_elapsed_time_multiplied_by_1000():
+    """B-NEW-42 — metadata.usage.latency (seconds) → total_elapsed_ms (ms) × 1000.
+
+    Plan §AC#4 marks "(4 orchestrator)" uniformity; agent_chat previously
+    had no total_elapsed_ms assignment. This task surfaces
+    metadata.usage.latency on message_end (mirroring completion's pattern)
+    and applies the × 1000 conversion. None remains None.
+    """
+    from ncmu_backend.schemas.sse_events import WorkflowFinishedData
+    from ncmu_backend.workflow.agent_chat import AgentChatOrchestrator
+
+    # Case 1: real seconds value → int(× 1000)
+    frames = [
+        {
+            "event": "message",
+            "answer": "hi",
+        },
+        {
+            "event": "message_end",
+            "metadata": {"usage": {"latency": 1.2286}},
+        },
+    ]
+    stub = _StubDifyClient(frames)
+    orch = AgentChatOrchestrator()
+    run_id, app_id, user_id, inputs = _make_run_args()
+    events = [ev async for ev in orch.run(stub, run_id, app_id, user_id, inputs)]
+    final = events[-1]
+    assert final.event_type == "workflow_finished"
+    assert isinstance(final.data, WorkflowFinishedData)
+    assert final.data.total_elapsed_ms == 1228, (
+        f"B-NEW-42: latency 1.2286s × 1000 truncated to int = 1228; got "
+        f"{final.data.total_elapsed_ms!r}"
+    )
+
+    # Case 2: latency missing → None (no implicit 0)
+    frames_none = [
+        {"event": "message", "answer": "hi"},
+        {"event": "message_end"},
+    ]
+    stub_none = _StubDifyClient(frames_none)
+    events_none = [
+        ev async for ev in orch.run(stub_none, run_id, app_id, user_id, inputs)
+    ]
+    final_none = events_none[-1]
+    assert isinstance(final_none.data, WorkflowFinishedData)
+    assert final_none.data.total_elapsed_ms is None, (
+        f"B-NEW-42: missing latency must yield None (not 0); got "
+        f"{final_none.data.total_elapsed_ms!r}"
+    )

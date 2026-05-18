@@ -32,6 +32,8 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, AsyncIterator
 
+import httpx
+
 from ncmu_backend.schemas.sse_events import (
     NcmuSseEvent,
     NodeFinishedData,
@@ -84,6 +86,9 @@ class WorkflowOrchestrator(BaseOrchestrator):
                         ),
                     )
                 elif event_name == "node_finished":
+                    # TASK-D B-NEW-42: data.elapsed_time is float seconds;
+                    # convert to ms at the boundary. None stays None.
+                    _et = data.get("elapsed_time")
                     yield NcmuSseEvent(
                         event_type="node_finished",
                         run_id=run_id,
@@ -96,7 +101,7 @@ class WorkflowOrchestrator(BaseOrchestrator):
                             # for the outputs=null background; Dify
                             # ``/v1/workflows/run`` emits the same shape.
                             outputs=data.get("outputs") or {},
-                            elapsed_ms=data.get("elapsed_time"),
+                            elapsed_ms=int(_et * 1000) if _et is not None else None,
                             error=data.get("error"),
                         ),
                     )
@@ -120,6 +125,9 @@ class WorkflowOrchestrator(BaseOrchestrator):
                     emitted_terminal = True
                     return
                 elif event_name == "workflow_finished":
+                    # TASK-D B-NEW-42: data.elapsed_time is float seconds;
+                    # convert to ms at the boundary. None stays None.
+                    _et = data.get("elapsed_time")
                     yield NcmuSseEvent(
                         event_type="workflow_finished",
                         run_id=run_id,
@@ -130,7 +138,9 @@ class WorkflowOrchestrator(BaseOrchestrator):
                             # for the outputs=null background; Dify
                             # ``/v1/workflows/run`` emits the same shape.
                             outputs=data.get("outputs") or {},
-                            total_elapsed_ms=data.get("elapsed_time"),
+                            total_elapsed_ms=(
+                                int(_et * 1000) if _et is not None else None
+                            ),
                             error=data.get("error"),
                         ),
                     )
@@ -141,6 +151,26 @@ class WorkflowOrchestrator(BaseOrchestrator):
             # see advanced_chat.py for the full rationale.
             cancelled = True
             raise
+        except httpx.TimeoutException as exc:
+            # TASK-D B-NEW-41: explicit timeout bucket — see advanced_chat.py
+            # for the full rationale. Workflow mode has no text accumulator
+            # → outputs is always {} (same as ``except Exception`` below).
+            if not emitted_terminal:
+                yield NcmuSseEvent(
+                    event_type="workflow_finished",
+                    run_id=run_id,
+                    timestamp=datetime.now(timezone.utc),
+                    data=WorkflowFinishedData(
+                        status="timeout",
+                        outputs={},
+                        error=(
+                            f"upstream timeout: {exc!r}"
+                            if str(exc)
+                            else "upstream timeout"
+                        ),
+                    ),
+                )
+                emitted_terminal = True
         except Exception as exc:
             # TASK-B: any Python runtime exception → emit terminal envelope.
             # Workflow mode has no text accumulator → outputs is always {}.
