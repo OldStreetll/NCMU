@@ -7,10 +7,8 @@
 // 补做 TASK-70 基础设施段，按 plan §修法 1352-1415 字面在此重新声明 canonical
 // 类型，新建的 workflow 共享原子件 + hook 全部 import from "@/lib/sse-types"。
 //
-// 已知 backlog（不阻塞本任务）：streamChat.ts line 69-132 当前持有同型 inline
-// duplicate；ChatWindow 仍 import from streamChat。后续清扫候选：streamChat.ts
-// 改为从此文件 re-export，ChatWindow import 切到 sse-types — 因当前禁区
-// "streamChat 不动" 暂存。
+// TASK-C 维度 32 (2026-05-14): streamChat.ts 的 inline duplicate 段已删 / 改
+// 为从此文件 re-export；ChatWindow 已切 import → sse-types — B-NEW-32 闭环。
 
 export type SseEventType =
   | "node_started"
@@ -20,6 +18,12 @@ export type SseEventType =
   | "tool_call"
   | "ping"
   | "error";
+
+// TASK-C (B-NEW-32) 维度 32 schema 单源: ``streamChat.ts`` previously declared
+// the same Literal under the name ``NcmuSseEventType``. Re-export under both
+// names so historical imports keep compiling against the canonical source
+// (sse-types) without forcing a rename across callers.
+export type NcmuSseEventType = SseEventType;
 
 export interface NodeStartedData {
   node_id: string;

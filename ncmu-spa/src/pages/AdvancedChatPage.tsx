@@ -1,9 +1,9 @@
 import { useState } from "react";
 import { useParams } from "react-router-dom";
-import { Layout } from "antd";
+import { Layout, notification } from "antd";
 import { ChatWindow } from "@/components/ChatWindow";
 import { NodeTraceViewer } from "@/components/workflow/NodeTraceViewer";
-import type { NcmuSseEvent } from "@/lib/sse-types";
+import type { NcmuSseEvent, WorkflowFinishedData } from "@/lib/sse-types";
 
 export function AdvancedChatPage() {
   const { appId } = useParams<{ appId: string }>();
@@ -18,28 +18,51 @@ export function AdvancedChatPage() {
 
   return (
     <Layout style={{ height: "100vh" }}>
-      <Layout.Content style={{ flex: 2, padding: 16, minHeight: 0 }}>
+      {/* TASK-C 维度 35 (B-NEW-35): page-{kind}- testid landmarks — chat-mode
+          pages only carry output (chat bubble area) + history (node trace
+          sider) because they have no DynamicInputForm / submit button at
+          the page level (input lives inside ChatWindow / ChatInput). */}
+      <Layout.Content
+        style={{ flex: 2, padding: 16, minHeight: 0 }}
+        data-testid="advanced-chat-output"
+      >
         <ChatWindow
           appId={appId!}
           sessionId={null}
           streamEndpointOverride={streamEndpoint}
-          // ChatWindow's `onNcmuEvent` parameter is the streamChat.ts copy of
-          // NcmuSseEvent (TASK-70a path B inline duplicate); NodeTraceViewer
-          // and this page consume the canonical sse-types.ts copy (TASK-70b-1
-          // baseline). The two are structurally compatible aside from a
-          // nullability nuance on `NodeStartedData.title` (streamChat allows
-          // null) — the duplicate-source backlog is documented in
-          // sse-types.ts top comment. Cast at this boundary until the
-          // backlog is cleared.
-          onNcmuEvent={(evt) =>
-            setNodeTrace((prev) => [...prev, evt as unknown as NcmuSseEvent])
-          }
+          // TASK-C 维度 32 (B-NEW-32): the schema-source backlog mentioned
+          // in the prior comment was closed by re-routing streamChat to
+          // re-export from sse-types — the `as unknown as NcmuSseEvent`
+          // cast is kept for forward-compat (ChatWindow's prop is still
+          // declared with the re-exported alias) but the underlying types
+          // now share one definition.
+          //
+          // TASK-C 维度 33 (B-NEW-33): TASK-B backend now ships error path
+          // as a `workflow_finished(failed/exception)` envelope (no throw),
+          // forwarded here via ChatWindow.onNcmuEvent. Surface it as a
+          // toast — the chat-mode page has no page-level submitting state
+          // (ChatWindow owns its own `streaming` flag), so the toast is
+          // the only user-facing feedback we add at the page boundary.
+          onNcmuEvent={(evt) => {
+            const canonical = evt as unknown as NcmuSseEvent;
+            if (canonical.event_type === "workflow_finished") {
+              const wf = canonical.data as WorkflowFinishedData;
+              if (wf.status === "failed" || wf.status === "exception") {
+                notification.error({
+                  message: wf.status === "failed" ? "上游错误" : "运行异常",
+                  description: wf.error || "未知错误",
+                });
+              }
+            }
+            setNodeTrace((prev) => [...prev, canonical]);
+          }}
         />
       </Layout.Content>
       <Layout.Sider
         width={320}
         theme="light"
         style={{ borderLeft: "1px solid #eee", overflow: "auto" }}
+        data-testid="advanced-chat-history"
       >
         <h3 style={{ padding: 16, margin: 0 }}>节点流</h3>
         <NodeTraceViewer nodeTrace={nodeTrace} />

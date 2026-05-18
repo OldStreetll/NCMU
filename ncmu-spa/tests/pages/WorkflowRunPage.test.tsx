@@ -297,4 +297,130 @@ describe("<WorkflowRunPage> (TASK-77)", () => {
     // useWorkflowRunList called with the URL appId.
     expect(mockUseWorkflowRunList).toHaveBeenCalledWith("test-app");
   });
+
+  // TASK-C 维度 33 + 36 (B-NEW-33 + B-NEW-36): AC-INDEP-1 / AC-INDEP-2
+  // symmetric coverage for the workflow page — mirror CompletionPage's
+  // INDEP-1/-2 contract so both pages that drive runWorkflow directly
+  // pin the same error UI behaviour.
+
+  it("AC-INDEP-1 — workflow_finished{status:'failed'} via onChunk → notification.error('上游错误') + submitting settles", async () => {
+    mockUseAppParameters.mockReturnValue({
+      data: [
+        { variable: "topic", label: "主题", type: "text" },
+      ] as ParameterSchema[],
+      isLoading: false,
+      isError: false,
+      error: null,
+    });
+
+    let pushedOnChunk:
+      | ((c: string | NcmuSseEvent) => void)
+      | null = null;
+    mockRunWorkflow.mockImplementation(async (_a, _v, onChunk) => {
+      pushedOnChunk = onChunk;
+    });
+    const { notification } = await import("antd");
+    const errorSpy = vi
+      .spyOn(notification, "error")
+      .mockImplementation(() => undefined);
+
+    renderAt();
+    const submitBtn = screen.getByRole("button", { name: /提\s?交/ });
+    fireEvent.click(submitBtn);
+
+    await waitFor(() => expect(mockRunWorkflow).toHaveBeenCalledTimes(1));
+
+    const errEvt = makeEvent("workflow_finished", {
+      status: "failed",
+      outputs: {},
+      error: "upstream X",
+    });
+
+    await act(async () => {
+      pushedOnChunk!(errEvt);
+    });
+
+    await waitFor(() => {
+      expect(errorSpy).toHaveBeenCalledTimes(1);
+    });
+    expect(errorSpy.mock.calls[0]![0]).toEqual(
+      expect.objectContaining({
+        message: "上游错误",
+        description: "upstream X",
+      }),
+    );
+
+    // submitting settles — the onChunk branch sets it to false before the
+    // page's finally also fires.
+    await waitFor(() => {
+      expect(submitBtn.className).not.toContain("ant-btn-loading");
+    });
+    errorSpy.mockRestore();
+  });
+
+  // TASK-C REWORK-INDEP-I-1 (AC-INDEP-3): symmetric coverage with
+  // CompletionPage — see that test's docstring for the full rationale.
+  // AbortError is the cancel path, NOT a failure; no toast must fire.
+  it("AC-INDEP-3 — AbortError rejection does NOT show toast (regression for I-1)", async () => {
+    mockUseAppParameters.mockReturnValue({
+      data: [
+        { variable: "topic", label: "主题", type: "text" },
+      ] as ParameterSchema[],
+      isLoading: false,
+      isError: false,
+      error: null,
+    });
+    mockRunWorkflow.mockImplementation(async () => {
+      const e = new Error("The user aborted a request");
+      e.name = "AbortError";
+      throw e;
+    });
+    const { notification } = await import("antd");
+    const errorSpy = vi
+      .spyOn(notification, "error")
+      .mockImplementation(() => undefined);
+
+    renderAt();
+    const submitBtn = screen.getByRole("button", { name: /提\s?交/ });
+    fireEvent.click(submitBtn);
+
+    // finally branch must settle submitting even on the early-return path.
+    await waitFor(() => {
+      expect(submitBtn.className).not.toContain("ant-btn-loading");
+    });
+
+    expect(errorSpy).not.toHaveBeenCalled();
+    errorSpy.mockRestore();
+  });
+
+  it("AC-INDEP-2 — runWorkflow rejection → notification.error('执行失败') + submitting settles", async () => {
+    mockUseAppParameters.mockReturnValue({
+      data: [
+        { variable: "topic", label: "主题", type: "text" },
+      ] as ParameterSchema[],
+      isLoading: false,
+      isError: false,
+      error: null,
+    });
+    mockRunWorkflow.mockImplementation(async () => {
+      throw new Error("boom");
+    });
+    const { notification } = await import("antd");
+    const errorSpy = vi
+      .spyOn(notification, "error")
+      .mockImplementation(() => undefined);
+
+    renderAt();
+    const submitBtn = screen.getByRole("button", { name: /提\s?交/ });
+    fireEvent.click(submitBtn);
+
+    await waitFor(() => {
+      expect(errorSpy).toHaveBeenCalledTimes(1);
+    });
+    // submitting must settle even on the rejection path (finally branch).
+    await waitFor(() => {
+      expect(submitBtn.className).not.toContain("ant-btn-loading");
+    });
+    errorSpy.mockRestore();
+  });
 });

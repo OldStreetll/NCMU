@@ -17,14 +17,14 @@
 // the F-NEW-1 / F-FRESH-2 / H-FRESH-3 PLAN-FIX修订 apply to the ChatWindow
 // path (TASK-75 / TASK-78), not to direct-runWorkflow callers.
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 import { Card, Layout, Tabs, notification } from "antd";
 import { DynamicInputForm } from "@/components/workflow/DynamicInputForm";
 import { NodeTraceViewer } from "@/components/workflow/NodeTraceViewer";
 import { RunHistoryList } from "@/components/workflow/RunHistoryList";
 import { runWorkflow, useAppParameters } from "@/lib/api";
-import type { NcmuSseEvent } from "@/lib/sse-types";
+import type { NcmuSseEvent, WorkflowFinishedData } from "@/lib/sse-types";
 
 export function WorkflowRunPage() {
   const { appId } = useParams<{ appId: string }>();
@@ -37,6 +37,18 @@ export function WorkflowRunPage() {
   const [submitting, setSubmitting] = useState(false);
   const { data: parameters } = useAppParameters(appId!);
 
+  // TASK-C 维度 34 (B-NEW-34): on unmount cancel any in-flight SSE so the
+  // background fetch doesn't keep pumping into setState on a torn-down tree
+  // (React 19 strict mode + dev tools surface this as a warning). The
+  // AbortController is replaced per handleSubmit invocation; useEffect's
+  // cleanup runs only on unmount because the dep array is empty.
+  const abortRef = useRef<AbortController | null>(null);
+  useEffect(() => {
+    return () => {
+      abortRef.current?.abort();
+    };
+  }, []);
+
   // REWORK-77-INDEP I-INDEP-2: runWorkflow may throw (network error / SSE
   // parse failure / backend 5xx). Without try/catch the rejection becomes an
   // unhandled promise + the user-visible state stays half-reset (nodeTrace and
@@ -46,6 +58,10 @@ export function WorkflowRunPage() {
     setSubmitting(true);
     setNodeTrace([]);
     setOutput({});
+    // Cancel a previous in-flight stream (if any) before starting a new one.
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
     try {
       // TASK-81 (B-NEW-26b): pass form values via the `inputs` slot of
       // RunWorkflowInputs — runWorkflow then serializes the 3-layer wire
@@ -56,12 +72,30 @@ export function WorkflowRunPage() {
         if (typeof evt === "string") return; // completion-mode chunks ignored
         setNodeTrace((prev) => [...prev, evt]);
         if (evt.event_type === "workflow_finished") {
-          const outs = (evt.data as { outputs?: Record<string, unknown> })
-            .outputs;
-          setOutput(outs ?? {});
+          // TASK-C 维度 33 (B-NEW-33): TASK-B backend now ships error path
+          // as workflow_finished(failed/exception) envelope (no throw).
+          // Surface it as a toast — succeeded path keeps the prior outputs
+          // serialization behaviour.
+          const wf = evt.data as WorkflowFinishedData;
+          if (wf.status === "failed" || wf.status === "exception") {
+            notification.error({
+              message: wf.status === "failed" ? "上游错误" : "运行异常",
+              description: wf.error || "未知错误",
+            });
+          } else {
+            const outs = (wf.outputs as Record<string, unknown> | undefined) ?? {};
+            setOutput(outs);
+          }
+          setSubmitting(false);
         }
-      });
+      }, controller.signal);
     } catch (err) {
+      // ★ TASK-C REWORK-INDEP-I-1: AbortController.abort() (unmount cleanup
+      // or handleSubmit's cancel-previous) causes the in-flight fetch to
+      // reject with `Error.name === "AbortError"` — that's an expected user
+      // action, not a failure. Mirror ChatWindow:427-428's existing guard
+      // so we don't surface a misleading "执行失败" toast on cancel paths.
+      if (err instanceof Error && err.name === "AbortError") return;
       notification.error({
         message: "执行失败",
         description: err instanceof Error ? err.message : String(err),
@@ -81,12 +115,19 @@ export function WorkflowRunPage() {
               label: "执行",
               children: (
                 <>
-                  <Card title="输入" style={{ marginBottom: 16 }}>
-                    <DynamicInputForm
-                      parameters={parameters ?? []}
-                      onSubmit={handleSubmit}
-                      submitting={submitting}
-                    />
+                  {/* TASK-C 维度 35 (B-NEW-35): page-{kind}- testid landmarks. */}
+                  <Card
+                    title="输入"
+                    style={{ marginBottom: 16 }}
+                    data-testid="workflow-form"
+                  >
+                    <div data-testid="workflow-submit">
+                      <DynamicInputForm
+                        parameters={parameters ?? []}
+                        onSubmit={handleSubmit}
+                        submitting={submitting}
+                      />
+                    </div>
                   </Card>
                   <Card title="节点流" style={{ marginBottom: 16 }}>
                     <NodeTraceViewer nodeTrace={nodeTrace} />
@@ -105,7 +146,11 @@ export function WorkflowRunPage() {
             {
               key: "history",
               label: "历史",
-              children: <RunHistoryList appId={appId!} />,
+              children: (
+                <div data-testid="workflow-history">
+                  <RunHistoryList appId={appId!} />
+                </div>
+              ),
             },
           ]}
         />

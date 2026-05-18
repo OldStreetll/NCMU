@@ -168,4 +168,45 @@ describe("<AgentChatPage> (TASK-78)", () => {
       "/workflow/apps/test-app-id/run",
     );
   });
+
+  // TASK-C 维度 33 (B-NEW-33): TASK-B backend ships error path as a
+  // workflow_finished(exception) envelope (no throw); agent-chat surfaces
+  // it via the ChatWindow.onNcmuEvent boundary as a toast. Page has no
+  // page-level submitting state (ChatWindow owns streaming flag).
+  it("(e) AC#2 error envelope — workflow_finished(exception) via onNcmuEvent → notification.error('运行异常')", async () => {
+    const { notification } = await import("antd");
+    const errorSpy = vi
+      .spyOn(notification, "error")
+      .mockImplementation(() => undefined);
+
+    renderAt("/apps/test-app-id/agent");
+    await waitFor(() => expect(chatWindowSpy).toHaveBeenCalled());
+
+    const props = lastChatWindowProps();
+    const onNcmuEvent = props.onNcmuEvent as (evt: NcmuSseEvent) => void;
+
+    const errEvt: NcmuSseEvent = {
+      event_type: "workflow_finished",
+      run_id: "55555555-5555-4555-8555-555555555555",
+      timestamp: "2026-05-18T00:00:01Z",
+      data: {
+        status: "exception",
+        outputs: {},
+        error: "httpx.RequestError: upstream lost",
+      },
+    };
+
+    await act(async () => {
+      onNcmuEvent(errEvt);
+    });
+
+    expect(errorSpy).toHaveBeenCalledTimes(1);
+    expect(errorSpy.mock.calls[0]![0]).toEqual(
+      expect.objectContaining({
+        message: "运行异常",
+        description: "httpx.RequestError: upstream lost",
+      }),
+    );
+    errorSpy.mockRestore();
+  });
 });

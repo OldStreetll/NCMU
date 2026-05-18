@@ -127,4 +127,46 @@ describe("<AdvancedChatPage> (TASK-75)", () => {
       "/workflow/apps/test-app-id/run",
     );
   });
+
+  // TASK-C 维度 33 (B-NEW-33): TASK-B backend ships error path as a
+  // workflow_finished(failed/exception) envelope (no throw); chat-mode
+  // pages surface it via the ChatWindow.onNcmuEvent boundary as a toast.
+  // The page has no page-level submitting state (ChatWindow owns
+  // streaming flag) so this is the only assertion at the page edge.
+  it("(d) AC#2 error envelope — workflow_finished(failed) via onNcmuEvent → notification.error('上游错误')", async () => {
+    const { notification } = await import("antd");
+    const errorSpy = vi
+      .spyOn(notification, "error")
+      .mockImplementation(() => undefined);
+
+    renderAt("/apps/test-app-id/chatflow");
+    await waitFor(() => expect(chatWindowSpy).toHaveBeenCalled());
+
+    const props = lastChatWindowProps();
+    const onNcmuEvent = props.onNcmuEvent as (evt: NcmuSseEvent) => void;
+
+    const errEvt: NcmuSseEvent = {
+      event_type: "workflow_finished",
+      run_id: "44444444-4444-4444-8444-444444444444",
+      timestamp: "2026-05-18T00:00:00Z",
+      data: {
+        status: "failed",
+        outputs: {},
+        error: "upstream invalid_param",
+      },
+    };
+
+    await act(async () => {
+      onNcmuEvent(errEvt);
+    });
+
+    expect(errorSpy).toHaveBeenCalledTimes(1);
+    expect(errorSpy.mock.calls[0]![0]).toEqual(
+      expect.objectContaining({
+        message: "上游错误",
+        description: "upstream invalid_param",
+      }),
+    );
+    errorSpy.mockRestore();
+  });
 });

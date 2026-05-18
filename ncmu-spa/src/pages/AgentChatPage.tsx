@@ -27,7 +27,7 @@
 
 import { useParams } from "react-router-dom";
 import { useState } from "react";
-import { Layout, Tabs } from "antd";
+import { Layout, Tabs, notification } from "antd";
 import { ChatWindow } from "@/components/ChatWindow";
 import { AgentThoughtTimeline } from "@/components/workflow/AgentThoughtTimeline";
 import { ToolCallCard } from "@/components/workflow/ToolCallCard";
@@ -35,6 +35,7 @@ import type {
   AgentThoughtData,
   NcmuSseEvent,
   ToolCallData,
+  WorkflowFinishedData,
 } from "@/lib/sse-types";
 
 export function AgentChatPage() {
@@ -46,7 +47,15 @@ export function AgentChatPage() {
 
   return (
     <Layout style={{ height: "100vh" }}>
-      <Layout.Content style={{ flex: 2, padding: 16, minHeight: 0 }}>
+      {/* TASK-C 维度 35 (B-NEW-35): page-{kind}- testid landmarks — chat-mode
+          pages only carry output (chat bubble area) + history (thoughts /
+          tool calls sider) because they have no DynamicInputForm / submit
+          button at the page level (input lives inside ChatWindow / ChatInput).
+          既有 `agent-chat-sider-tabs` / `tool-call-list` 保留。 */}
+      <Layout.Content
+        style={{ flex: 2, padding: 16, minHeight: 0 }}
+        data-testid="agent-chat-output"
+      >
         <ChatWindow
           appId={appId!}
           sessionId={null}
@@ -63,6 +72,19 @@ export function AgentChatPage() {
                 ...prev,
                 canonical.data as ToolCallData,
               ]);
+            } else if (canonical.event_type === "workflow_finished") {
+              // TASK-C 维度 33 (B-NEW-33): TASK-B backend ships error path
+              // as workflow_finished(failed/exception) envelope. Chat-mode
+              // page has no page-level submitting state (ChatWindow owns
+              // streaming flag), so the toast is the only feedback added
+              // at this boundary.
+              const wf = canonical.data as WorkflowFinishedData;
+              if (wf.status === "failed" || wf.status === "exception") {
+                notification.error({
+                  message: wf.status === "failed" ? "上游错误" : "运行异常",
+                  description: wf.error || "未知错误",
+                });
+              }
             }
           }}
         />
@@ -71,6 +93,7 @@ export function AgentChatPage() {
         width={360}
         theme="light"
         style={{ borderLeft: "1px solid #eee", overflow: "auto" }}
+        data-testid="agent-chat-history"
       >
         <Tabs
           data-testid="agent-chat-sider-tabs"

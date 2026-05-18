@@ -45,92 +45,29 @@ export interface ErrorData {
   [k: string]: unknown;
 }
 
-// --- TASK-70a: NCMU SSE envelope types (path B / inline) -------------------
-// Why inline here rather than `@/lib/sse-types`: plan TASK-70a line 1617
-// references `@/lib/sse-types` which TASK-70 (B3 batch) was scheduled to
-// create first, but TASK-70 has not run yet (current dep gate: 67a/67b/68/69
-// committed + INDEP four-pass). Pane 0 / Boss decided path B
-// ([INTENT-CHECK-ACK] 2026-05-09) — colocate with streamChat.ts since this
-// file is the natural SSE-types module. TASK-70 will refactor these out
-// into ncmu-spa/src/lib/sse-types.ts via [SCOPE-CHANGE] protocol; consumers
-// that import from "@/lib/streamChat" today will switch to
-// "@/lib/sse-types" then.
+// --- TASK-70a / TASK-C (B-NEW-32) 维度 32 schema 单源: NCMU SSE envelope types
+// canonical source ------------------------------------------------------------
+// Pre-TASK-C history: this module held an inline duplicate of the 5
+// sub-schemas + envelope (TASK-70a path B / colocated with streamChat) while
+// `@/lib/sse-types` was rolled out by TASK-70b-1. TASK-C 维度 32 closes that
+// backlog by re-exporting the canonical types from sse-types so the SPA has
+// a single source of truth (matches backend `schemas/sse_events.py` 5 sub-
+// schemas + NcmuSseEvent envelope — TASK-68 commit e6a1bc1).
 //
-// Field names + literals mirror backend
-// `ncmu-backend/src/ncmu_backend/schemas/sse_events.py` 5 sub-schemas + the
-// envelope (TASK-68, commit e6a1bc1). Pydantic `dict[str, Any]` maps to TS
-// `Record<string, unknown>`. NIT-INDEP68-1 (TASK-68 backend Union ordering
-// sensitivity): keep `ping` / `error` envelope-data branch on the
-// `Record<string, unknown>` tail of the union — none of the keys
-// node_id / node_type / thought / tool_name / status / tool_input may
-// appear on those control-plane payloads, otherwise structural narrowing
-// could mis-attribute them to a sibling member.
-
-export interface NodeStartedData {
-  node_id: string;
-  node_type: string;
-  title?: string | null;
-  inputs?: Record<string, unknown>;
-}
-
-export interface NodeFinishedData {
-  node_id: string;
-  node_type: string;
-  // H2 (PLAN-FIX-2) terminal status mapping: 4 collapsed values.
-  status: "succeeded" | "failed" | "stopped" | "exception";
-  outputs?: Record<string, unknown>;
-  elapsed_ms?: number | null;
-  error?: string | null;
-}
-
-export interface WorkflowFinishedData {
-  // partial-succeeded → succeeded per H2 mapping.
-  status: "succeeded" | "failed" | "stopped" | "exception";
-  outputs?: Record<string, unknown>;
-  total_elapsed_ms?: number | null;
-  error?: string | null;
-}
-
-export interface AgentThoughtData {
-  thought: string;
-  observation?: string | null;
-  tool_name?: string | null;
-}
-
-export interface ToolCallData {
-  tool_name: string;
-  tool_input: Record<string, unknown>;
-  tool_output?: unknown;
-  status: "calling" | "completed" | "failed";
-}
-
-export type NcmuSseEventType =
-  | "node_started"
-  | "node_finished"
-  | "workflow_finished"
-  | "agent_thought"
-  | "tool_call"
-  | "ping"
-  | "error";
-
-// The envelope every NCMU workflow SSE frame ships in. Matches backend
-// `NcmuSseEvent` Pydantic model; backend `routes.py:96+109` serializes
-// the entire envelope to the SSE `data:` line, so frontend SSE parsers
-// receive THIS shape (not the inner per-event sub-schema).
-export interface NcmuSseEvent {
-  event_type: NcmuSseEventType;
-  run_id: string;
-  // ISO-8601 timestamp string (Pydantic datetime → JSON string).
-  timestamp: string;
-  data:
-    | NodeStartedData
-    | NodeFinishedData
-    | WorkflowFinishedData
-    | AgentThoughtData
-    | ToolCallData
-    | Record<string, unknown>;
-}
-// --- end TASK-70a inline types ----------------------------------------------
+// Note: `ErrorData` / `MessageData` / `MessageEndData` / `SessionCreatedData`
+// (Phase 1 chat-mode types declared above) stay LOCAL to streamChat.ts —
+// they describe the original Dify chat SSE event payloads, NOT NCMU's
+// workflow envelope; sse-types is intentionally narrowed to the envelope.
+export type {
+  NodeStartedData,
+  NodeFinishedData,
+  WorkflowFinishedData,
+  AgentThoughtData,
+  ToolCallData,
+  NcmuSseEventType,
+  NcmuSseEvent,
+} from "@/lib/sse-types";
+// --- end re-export ----------------------------------------------------------
 
 export type StreamEventName =
   | "ncmu.session_created"

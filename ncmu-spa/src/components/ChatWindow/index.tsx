@@ -5,11 +5,13 @@ import {
   type ErrorData,
   type MessageData,
   type MessageEndData,
-  type NcmuSseEvent,
   type SessionCreatedData,
-  type WorkflowFinishedData,
   streamChat,
 } from "@/lib/streamChat";
+// TASK-C (B-NEW-32) 维度 32: NCMU envelope types now sourced from the
+// canonical sse-types module (streamChat re-exports them but importing
+// directly avoids the extra indirection).
+import type { NcmuSseEvent, WorkflowFinishedData } from "@/lib/sse-types";
 import { ChatInput } from "./ChatInput";
 import { type ChatMessage, type MessageRole } from "./MessageBubble";
 import { MessageList } from "./MessageList";
@@ -17,8 +19,9 @@ import { MessageList } from "./MessageList";
 // TASK-70a: 5 NCMU envelope event names. The streamChat consumer's switch
 // `default` branch matches against this set to decide whether to forward
 // the parsed envelope to `onNcmuEvent` (set lookup is O(1)). Keep this in
-// sync with `NcmuSseEventType` in @/lib/streamChat — the Literal there is
-// authoritative; this Set is only for runtime membership testing.
+// sync with `SseEventType` / `NcmuSseEventType` in @/lib/sse-types — the
+// Literal there is authoritative (TASK-C 维度 32 schema 单源); this Set is
+// only for runtime membership testing.
 const NCMU_EVENT_NAMES: ReadonlySet<string> = new Set<string>([
   "node_started",
   "node_finished",

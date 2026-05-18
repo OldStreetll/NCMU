@@ -303,4 +303,141 @@ describe("<CompletionPage>", () => {
       expect(submitBtn.className).not.toContain("ant-btn-loading");
     });
   });
+
+  // TASK-C 维度 33 (B-NEW-33): TASK-B backend now ships error path as a
+  // workflow_finished(exception) envelope (no throw); the prior catch(err)
+  // branch never fires for this path. AC-INDEP-1 (above) covers the
+  // succeeded envelope; this test covers the exception envelope so both
+  // status flavours are pinned. submitting must also settle (the onChunk
+  // branch sets it to false before the page's `finally` also fires).
+  it("AC#2 error envelope — workflow_finished(exception) → notification.error('运行异常') + submitting settles", async () => {
+    mockUseAppParameters.mockReturnValue({
+      data: [
+        { variable: "topic", label: "主题", type: "text" },
+      ] as ParameterSchema[],
+      isLoading: false,
+      isError: false,
+      error: null,
+    });
+
+    const envelope: NcmuSseEvent = {
+      event_type: "workflow_finished",
+      run_id: "66666666-6666-4666-8666-666666666666",
+      timestamp: "2026-05-18T00:00:02Z",
+      data: {
+        status: "exception",
+        outputs: {},
+        error: "RuntimeError: late error",
+      },
+    };
+    mockRunWorkflow.mockImplementation(async (_appId, _values, onChunk) => {
+      onChunk(envelope);
+    });
+    const errorSpy = vi
+      .spyOn(notification, "error")
+      .mockImplementation(() => undefined);
+
+    renderAt();
+    const submitBtn = screen.getByRole("button", { name: /提\s?交/ });
+    fireEvent.click(submitBtn);
+
+    await waitFor(() => {
+      expect(errorSpy).toHaveBeenCalledTimes(1);
+    });
+    expect(errorSpy.mock.calls[0]![0]).toEqual(
+      expect.objectContaining({
+        message: "运行异常",
+        description: "RuntimeError: late error",
+      }),
+    );
+
+    await waitFor(() => {
+      expect(submitBtn.className).not.toContain("ant-btn-loading");
+    });
+  });
+
+  // TASK-C REWORK-INDEP-I-1 (AC-INDEP-3): when AbortController.abort()
+  // fires (unmount cleanup or handleSubmit's cancel-previous), fetch
+  // rejects the in-flight runWorkflow promise with `Error.name ===
+  // "AbortError"`. That's a normal user action, NOT a failure — surfacing
+  // it as a "执行失败" toast misleads users who clicked away or hit cancel.
+  // The page's catch block must short-circuit on AbortError exactly like
+  // ChatWindow:427-428 already does. submitting must still settle in the
+  // finally branch so a re-mount finds a clean state.
+  it("AC-INDEP-3 — AbortError rejection does NOT show toast (regression for I-1)", async () => {
+    mockUseAppParameters.mockReturnValue({
+      data: [
+        { variable: "topic", label: "主题", type: "text" },
+      ] as ParameterSchema[],
+      isLoading: false,
+      isError: false,
+      error: null,
+    });
+    // Synthesize the rejection shape Web Fetch produces on abort: an
+    // Error subclass whose `.name === "AbortError"`. The page's guard
+    // checks `err instanceof Error && err.name === "AbortError"`.
+    mockRunWorkflow.mockImplementation(async () => {
+      const e = new Error("The user aborted a request");
+      e.name = "AbortError";
+      throw e;
+    });
+    const errorSpy = vi
+      .spyOn(notification, "error")
+      .mockImplementation(() => undefined);
+
+    renderAt();
+    const submitBtn = screen.getByRole("button", { name: /提\s?交/ });
+    fireEvent.click(submitBtn);
+
+    // Wait for the rejection to flow through the page (the catch branch
+    // either returns early or fires notification.error). We can't await
+    // a sentinel from the page directly, so wait for the submitting flag
+    // to settle — the finally clause runs regardless of the early return.
+    await waitFor(() => {
+      expect(submitBtn.className).not.toContain("ant-btn-loading");
+    });
+
+    // The critical assertion: NO toast was shown for the abort path.
+    expect(errorSpy).not.toHaveBeenCalled();
+    errorSpy.mockRestore();
+  });
+
+  // TASK-C 维度 34 (B-NEW-34): on unmount the page must abort any
+  // in-flight SSE so background fetch doesn't keep pumping into setState
+  // on a torn-down tree. mockRunWorkflow keeps the promise pending; we
+  // capture the signal handed to runWorkflow at click time and assert
+  // .aborted flips true after unmount fires the useEffect cleanup.
+  it("AC#3 abort — unmount aborts in-flight runWorkflow via AbortSignal", async () => {
+    mockUseAppParameters.mockReturnValue({
+      data: [
+        { variable: "topic", label: "主题", type: "text" },
+      ] as ParameterSchema[],
+      isLoading: false,
+      isError: false,
+      error: null,
+    });
+
+    let capturedSignal: AbortSignal | undefined;
+    mockRunWorkflow.mockImplementation(
+      async (_appId, _values, _onChunk, signal) => {
+        capturedSignal = signal;
+        // Never resolve — pretend the SSE stream is in flight.
+        return new Promise<void>(() => {});
+      },
+    );
+
+    const { unmount } = renderAt();
+    fireEvent.click(screen.getByRole("button", { name: /提\s?交/ }));
+
+    await waitFor(() => {
+      expect(mockRunWorkflow).toHaveBeenCalledTimes(1);
+    });
+    expect(capturedSignal).toBeDefined();
+    expect(capturedSignal!.aborted).toBe(false);
+
+    unmount();
+
+    // useEffect cleanup runs on unmount → abortRef.current.abort().
+    expect(capturedSignal!.aborted).toBe(true);
+  });
 });
