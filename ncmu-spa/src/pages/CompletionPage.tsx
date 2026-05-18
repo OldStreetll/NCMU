@@ -97,9 +97,23 @@ export function CompletionPage() {
           // Surface it as a toast so the user sees feedback — succeeded
           // path keeps the prior outputs.answer rendering behaviour.
           const wf = chunk.data as WorkflowFinishedData;
-          if (wf.status === "failed" || wf.status === "exception") {
+          // TASK-E (B-NEW-52): backend +'timeout' Literal. Surface with
+          // dedicated "运行超时" copy — the else branch sets output state
+          // from outputs.answer, which is empty on timeout → would render
+          // an empty Card (silent UX fallthrough). INDEP TASK-D 主审盲区
+          // #11 「用户体验完整路径」实证。
+          if (
+            wf.status === "failed" ||
+            wf.status === "exception" ||
+            wf.status === "timeout"
+          ) {
             notification.error({
-              message: wf.status === "failed" ? "上游错误" : "运行异常",
+              message:
+                wf.status === "failed"
+                  ? "上游错误"
+                  : wf.status === "exception"
+                    ? "运行异常"
+                    : "运行超时",
               description: wf.error || "未知错误",
             });
           } else {

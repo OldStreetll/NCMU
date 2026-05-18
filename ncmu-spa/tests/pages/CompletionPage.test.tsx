@@ -440,4 +440,111 @@ describe("<CompletionPage>", () => {
     // useEffect cleanup runs on unmount → abortRef.current.abort().
     expect(capturedSignal!.aborted).toBe(true);
   });
+
+  // TASK-E (B-NEW-52) — regression lock: status='failed' → '上游错误' must
+  // survive the nested-ternary expansion in src/pages/CompletionPage.tsx:102.
+  // Without this lock, a typo in the new 'timeout' branch could silently
+  // collapse the failed/exception branches.
+  it("test_e1_status_failed_unchanged_behavior — failed envelope still maps to '上游错误'", async () => {
+    mockUseAppParameters.mockReturnValue({
+      data: [
+        { variable: "topic", label: "主题", type: "text" },
+      ] as ParameterSchema[],
+      isLoading: false,
+      isError: false,
+      error: null,
+    });
+
+    const envelope: NcmuSseEvent = {
+      event_type: "workflow_finished",
+      run_id: "e1e1e1e1-e1e1-4e1e-8e1e-e1e1e1e1e1e1",
+      timestamp: "2026-05-18T01:00:00Z",
+      data: {
+        status: "failed",
+        outputs: {},
+        error: "upstream invalid_param",
+      },
+    };
+    mockRunWorkflow.mockImplementation(async (_a, _v, onChunk) => {
+      onChunk(envelope);
+    });
+    const errorSpy = vi
+      .spyOn(notification, "error")
+      .mockImplementation(() => undefined);
+
+    renderAt();
+    const submitBtn = screen.getByRole("button", { name: /提\s?交/ });
+    fireEvent.click(submitBtn);
+
+    await waitFor(() => {
+      expect(errorSpy).toHaveBeenCalledTimes(1);
+    });
+    expect(errorSpy.mock.calls[0]![0]).toEqual(
+      expect.objectContaining({
+        message: "上游错误",
+        description: "upstream invalid_param",
+      }),
+    );
+    await waitFor(() => {
+      expect(submitBtn.className).not.toContain("ant-btn-loading");
+    });
+    errorSpy.mockRestore();
+  });
+
+  // TASK-E (B-NEW-52) — new branch: status='timeout' must NOT silent
+  // fallthrough into the success path (which would attempt to read
+  // wf.outputs.answer and render empty). INDEP TASK-D 主审盲区 #11 实证。
+  it("test_e2_status_timeout_shows_timeout_message — timeout envelope shows '运行超时'", async () => {
+    mockUseAppParameters.mockReturnValue({
+      data: [
+        { variable: "topic", label: "主题", type: "text" },
+      ] as ParameterSchema[],
+      isLoading: false,
+      isError: false,
+      error: null,
+    });
+
+    const envelope: NcmuSseEvent = {
+      event_type: "workflow_finished",
+      run_id: "e2e2e2e2-e2e2-4e2e-8e2e-e2e2e2e2e2e2",
+      timestamp: "2026-05-18T01:00:01Z",
+      data: {
+        status: "timeout",
+        outputs: {},
+        error: "upstream timeout: TimeoutException('read timeout')",
+      },
+    };
+    mockRunWorkflow.mockImplementation(async (_a, _v, onChunk) => {
+      onChunk(envelope);
+    });
+    const errorSpy = vi
+      .spyOn(notification, "error")
+      .mockImplementation(() => undefined);
+
+    renderAt();
+    const submitBtn = screen.getByRole("button", { name: /提\s?交/ });
+    fireEvent.click(submitBtn);
+
+    // (a) showError called exactly once (not silent fallthrough)
+    await waitFor(() => {
+      expect(errorSpy).toHaveBeenCalledTimes(1);
+    });
+    // (b) message literal "运行超时" — NOT "上游错误" or "运行异常"
+    expect(errorSpy.mock.calls[0]![0]).toEqual(
+      expect.objectContaining({
+        message: "运行超时",
+        description: "upstream timeout: TimeoutException('read timeout')",
+      }),
+    );
+    // (c) submitting settles — the onChunk branch sets it to false before
+    // the page's finally also fires.
+    await waitFor(() => {
+      expect(submitBtn.className).not.toContain("ant-btn-loading");
+    });
+    // (d) output region NOT populated with success content (silent
+    // fallthrough check — placeholder remains since the success branch
+    // does not fire on timeout).
+    expect(screen.queryByText("（待执行）")).toBeInTheDocument();
+    errorSpy.mockRestore();
+  });
 });

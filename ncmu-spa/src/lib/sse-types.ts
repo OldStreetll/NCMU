@@ -44,8 +44,13 @@ export interface NodeFinishedData {
 }
 
 export interface WorkflowFinishedData {
-  // ★H2：与 backend WorkflowFinishedData Literal 对齐（4 终态）。
-  status: "succeeded" | "failed" | "stopped" | "exception";
+  // ★H2：与 backend WorkflowFinishedData Literal 对齐（5 终态）。
+  // TASK-E (B-NEW-52 / TASK-D INDEP follow-up): +'timeout' — backend
+  // schemas/sse_events.py:120 加了 'timeout' 第 5 值（commit `9baad18`）
+  // 用于显式分流 httpx.TimeoutException 给 main.py boot-sweeper
+  // finalize_run('timeout') 一致路径。NodeFinishedData.status (line 40)
+  // 现阶段不扩 — INDEP N2 verdict 节点级 timeout 暂无实证需求。
+  status: "succeeded" | "failed" | "stopped" | "exception" | "timeout";
   outputs: Record<string, unknown>;
   total_elapsed_ms?: number;
   error?: string;

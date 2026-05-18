@@ -169,4 +169,91 @@ describe("<AdvancedChatPage> (TASK-75)", () => {
     );
     errorSpy.mockRestore();
   });
+
+  // TASK-E (B-NEW-52) — regression lock: status='failed' → '上游错误' must
+  // survive the nested-ternary expansion in src/pages/AdvancedChatPage.tsx:52.
+  // Without this lock, a typo in the new 'timeout' branch could silently
+  // collapse the failed/exception branches into "运行超时".
+  it("test_e1_status_failed_unchanged_behavior — failed envelope still maps to '上游错误'", async () => {
+    const { notification } = await import("antd");
+    const errorSpy = vi
+      .spyOn(notification, "error")
+      .mockImplementation(() => undefined);
+
+    renderAt("/apps/test-app-id/chatflow");
+    await waitFor(() => expect(chatWindowSpy).toHaveBeenCalled());
+
+    const props = lastChatWindowProps();
+    const onNcmuEvent = props.onNcmuEvent as (evt: NcmuSseEvent) => void;
+
+    const errEvt: NcmuSseEvent = {
+      event_type: "workflow_finished",
+      run_id: "e1e1e1e1-e1e1-4e1e-8e1e-e1e1e1e1e1e1",
+      timestamp: "2026-05-18T01:00:00Z",
+      data: {
+        status: "failed",
+        outputs: {},
+        error: "upstream invalid_param",
+      },
+    };
+
+    await act(async () => {
+      onNcmuEvent(errEvt);
+    });
+
+    expect(errorSpy).toHaveBeenCalledTimes(1);
+    expect(errorSpy.mock.calls[0]![0]).toEqual(
+      expect.objectContaining({
+        message: "上游错误",
+        description: "upstream invalid_param",
+      }),
+    );
+    errorSpy.mockRestore();
+  });
+
+  // TASK-E (B-NEW-52) — new branch: status='timeout' must NOT silent
+  // fallthrough into the success path. INDEP TASK-D 主审盲区 #11 「用户体
+  // 验完整路径」实证 — backend Pydantic Literal +'timeout' 已落但 SPA TS
+  // Literal + handler enum 未同步 → user 看到 timeout 时 page 默认走"成功"
+  // 分支 silent fallthrough。本 test 锁定 fix 后 timeout → "运行超时" toast。
+  it("test_e2_status_timeout_shows_timeout_message — timeout envelope shows '运行超时'", async () => {
+    const { notification } = await import("antd");
+    const errorSpy = vi
+      .spyOn(notification, "error")
+      .mockImplementation(() => undefined);
+
+    renderAt("/apps/test-app-id/chatflow");
+    await waitFor(() => expect(chatWindowSpy).toHaveBeenCalled());
+
+    const props = lastChatWindowProps();
+    const onNcmuEvent = props.onNcmuEvent as (evt: NcmuSseEvent) => void;
+
+    const timeoutEvt: NcmuSseEvent = {
+      event_type: "workflow_finished",
+      run_id: "e2e2e2e2-e2e2-4e2e-8e2e-e2e2e2e2e2e2",
+      timestamp: "2026-05-18T01:00:01Z",
+      data: {
+        status: "timeout",
+        outputs: {},
+        error: "upstream timeout: TimeoutException('read timeout')",
+      },
+    };
+
+    await act(async () => {
+      onNcmuEvent(timeoutEvt);
+    });
+
+    // (a) showError called exactly once (not silent fallthrough into success path)
+    expect(errorSpy).toHaveBeenCalledTimes(1);
+    // (b) message literal "运行超时" — NOT "上游错误" or "运行异常"
+    expect(errorSpy.mock.calls[0]![0]).toEqual(
+      expect.objectContaining({
+        message: "运行超时",
+        description: "upstream timeout: TimeoutException('read timeout')",
+      }),
+    );
+    // (c/d) the error description carries backend's literal error string
+    // (字段级 — 守 memory `feedback_pre_existing_error_strict_validation`).
+    errorSpy.mockRestore();
+  });
 });

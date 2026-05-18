@@ -79,9 +79,20 @@ export function AgentChatPage() {
               // streaming flag), so the toast is the only feedback added
               // at this boundary.
               const wf = canonical.data as WorkflowFinishedData;
-              if (wf.status === "failed" || wf.status === "exception") {
+              // TASK-E (B-NEW-52): see AdvancedChatPage.tsx for the
+              // 'timeout' rationale.
+              if (
+                wf.status === "failed" ||
+                wf.status === "exception" ||
+                wf.status === "timeout"
+              ) {
                 notification.error({
-                  message: wf.status === "failed" ? "上游错误" : "运行异常",
+                  message:
+                    wf.status === "failed"
+                      ? "上游错误"
+                      : wf.status === "exception"
+                        ? "运行异常"
+                        : "运行超时",
                   description: wf.error || "未知错误",
                 });
               }

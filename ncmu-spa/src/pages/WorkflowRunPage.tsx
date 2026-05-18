@@ -77,9 +77,21 @@ export function WorkflowRunPage() {
           // Surface it as a toast — succeeded path keeps the prior outputs
           // serialization behaviour.
           const wf = evt.data as WorkflowFinishedData;
-          if (wf.status === "failed" || wf.status === "exception") {
+          // TASK-E (B-NEW-52): see CompletionPage.tsx for the 'timeout'
+          // rationale (this page's success branch sets output to {} which
+          // visually clobbers the prior run on a silent fallthrough).
+          if (
+            wf.status === "failed" ||
+            wf.status === "exception" ||
+            wf.status === "timeout"
+          ) {
             notification.error({
-              message: wf.status === "failed" ? "上游错误" : "运行异常",
+              message:
+                wf.status === "failed"
+                  ? "上游错误"
+                  : wf.status === "exception"
+                    ? "运行异常"
+                    : "运行超时",
               description: wf.error || "未知错误",
             });
           } else {

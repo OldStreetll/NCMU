@@ -47,9 +47,23 @@ export function AdvancedChatPage() {
             const canonical = evt as unknown as NcmuSseEvent;
             if (canonical.event_type === "workflow_finished") {
               const wf = canonical.data as WorkflowFinishedData;
-              if (wf.status === "failed" || wf.status === "exception") {
+              // TASK-E (B-NEW-52): backend WorkflowFinishedData.status now
+              // also carries 'timeout'; surface it with a dedicated copy
+              // ("运行超时") so it does NOT silent-fallthrough into the
+              // implicit success branch (which here is a no-op but on
+              // form-mode pages would render an empty output).
+              if (
+                wf.status === "failed" ||
+                wf.status === "exception" ||
+                wf.status === "timeout"
+              ) {
                 notification.error({
-                  message: wf.status === "failed" ? "上游错误" : "运行异常",
+                  message:
+                    wf.status === "failed"
+                      ? "上游错误"
+                      : wf.status === "exception"
+                        ? "运行异常"
+                        : "运行超时",
                   description: wf.error || "未知错误",
                 });
               }
