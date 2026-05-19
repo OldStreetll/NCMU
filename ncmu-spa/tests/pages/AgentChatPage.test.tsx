@@ -272,7 +272,9 @@ describe("<AgentChatPage> (TASK-78)", () => {
       timestamp: "2026-05-18T01:00:01Z",
       data: {
         status: "timeout",
-        outputs: {},
+        // TASK-G (B-NEW-54): partial answer mock — see AdvancedChatPage for
+        // rationale; byte-exact same envelope keeps chat-mode pages aligned.
+        outputs: { answer: "部分回答（被中断）" },
         error: "upstream timeout: TimeoutException('read timeout')",
       },
     };
@@ -358,7 +360,9 @@ describe("<AgentChatPage> (TASK-78)", () => {
       timestamp: "2026-05-19T01:00:01Z",
       data: {
         status: "stopped",
-        outputs: {},
+        // TASK-G (B-NEW-54): partial answer mock — see AdvancedChatPage for
+        // rationale; byte-exact same envelope keeps chat-mode pages aligned.
+        outputs: { answer: "部分回答（被中断）" },
         error: "Run stopped by user",
       },
     };

@@ -513,7 +513,13 @@ describe("<WorkflowRunPage> (TASK-77)", () => {
 
     const timeoutEvt = makeEvent("workflow_finished", {
       status: "timeout",
-      outputs: {},
+      // TASK-G (B-NEW-54): partial answer mock — Dify v1.13.3 timeout may
+      // carry `outputs.answer` non-empty. WorkflowRunPage.tsx:104-105 has NO
+      // type guard, always calls setOutput(outs); the assertion below locks
+      // that the fix-removed counterfactual would have unconditionally
+      // setOutput({ answer: "部分回答…" }) → JSON dump would render the
+      // literal. Real silent-fallthrough reverse.
+      outputs: { answer: "部分回答（被中断）" },
       error: "upstream timeout: TimeoutException('read timeout')",
     });
 
@@ -537,6 +543,16 @@ describe("<WorkflowRunPage> (TASK-77)", () => {
     await waitFor(() => {
       expect(submitBtn.className).not.toContain("ant-btn-loading");
     });
+    // (d) TASK-G (B-NEW-54) strengthen — partial answer literal NOT rendered.
+    // Mock now carries `outputs.answer = "部分回答（被中断）"` (real Dify
+    // v1.13.3 timeout path may carry partial generation); the fix-removed
+    // counterfactual would have hit WorkflowRunPage.tsx:104-105 unconditional
+    // setOutput(outs) → JSON dump would include the partial-answer literal.
+    // Direct DOM textContent check on the output <pre> testid is the most
+    // stable form (page renders JSON.stringify(output, null, 2)).
+    expect(
+      screen.getByTestId("workflow-output").textContent,
+    ).not.toContain("部分回答（被中断）");
     errorSpy.mockRestore();
   });
 
@@ -633,7 +649,10 @@ describe("<WorkflowRunPage> (TASK-77)", () => {
 
     const stoppedEvt = makeEvent("workflow_finished", {
       status: "stopped",
-      outputs: {},
+      // TASK-G (B-NEW-54): partial answer mock — Dify v1.13.3 stopped may
+      // carry `outputs.answer` non-empty. Same unconditional-setOutput
+      // counterfactual as test_e2 (see comment above).
+      outputs: { answer: "部分回答（被中断）" },
       error: "Run stopped by user",
     });
 
@@ -657,6 +676,11 @@ describe("<WorkflowRunPage> (TASK-77)", () => {
     await waitFor(() => {
       expect(submitBtn.className).not.toContain("ant-btn-loading");
     });
+    // (d) TASK-G (B-NEW-54) strengthen — partial answer literal NOT rendered.
+    // Same counterfactual reverse as test_e2 (see comment there).
+    expect(
+      screen.getByTestId("workflow-output").textContent,
+    ).not.toContain("部分回答（被中断）");
     errorSpy.mockRestore();
   });
 });

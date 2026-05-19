@@ -510,7 +510,13 @@ describe("<CompletionPage>", () => {
       timestamp: "2026-05-18T01:00:01Z",
       data: {
         status: "timeout",
-        outputs: {},
+        // TASK-G (B-NEW-54): partial answer mock — Dify v1.13.3 timeout may
+        // carry `outputs.answer` non-empty. CompletionPage.tsx:126-128 reads
+        // outputs.answer + setOutput only in else (success) branch; the new
+        // assertion below locks that the fix-removed counterfactual (where
+        // OR-clause didn't match timeout) would have setOutput("部分回答…")
+        // and replaced the placeholder. Real silent-fallthrough reverse.
+        outputs: { answer: "部分回答（被中断）" },
         error: "upstream timeout: TimeoutException('read timeout')",
       },
     };
@@ -545,6 +551,13 @@ describe("<CompletionPage>", () => {
     // fallthrough check — placeholder remains since the success branch
     // does not fire on timeout).
     expect(screen.queryByText("（待执行）")).toBeInTheDocument();
+    // (e) TASK-G (B-NEW-54) strengthen — partial answer literal NOT in DOM.
+    // Mock now carries `outputs.answer = "部分回答（被中断）"` (real Dify
+    // v1.13.3 timeout path may carry partial generation); the fix-removed
+    // counterfactual would have hit CompletionPage.tsx:126-128 else branch
+    // → setOutput("部分回答（被中断）") → placeholder replaced. Locks both
+    // halves: placeholder still present + partial answer not rendered.
+    expect(screen.queryByText("部分回答（被中断）")).not.toBeInTheDocument();
     errorSpy.mockRestore();
   });
 
@@ -622,7 +635,10 @@ describe("<CompletionPage>", () => {
       timestamp: "2026-05-19T01:00:01Z",
       data: {
         status: "stopped",
-        outputs: {},
+        // TASK-G (B-NEW-54): partial answer mock — Dify v1.13.3 stopped may
+        // carry `outputs.answer` non-empty (user-cancelled partial run). Real
+        // silent-fallthrough reverse on form-mode (see test_e2 for rationale).
+        outputs: { answer: "部分回答（被中断）" },
         error: "Run stopped by user",
       },
     };
@@ -657,6 +673,9 @@ describe("<CompletionPage>", () => {
     // fallthrough check — placeholder remains since the success branch
     // does not fire on stopped).
     expect(screen.queryByText("（待执行）")).toBeInTheDocument();
+    // (e) TASK-G (B-NEW-54) strengthen — partial answer literal NOT in DOM
+    // (see test_e2 for rationale; same counterfactual reverse for stopped).
+    expect(screen.queryByText("部分回答（被中断）")).not.toBeInTheDocument();
     errorSpy.mockRestore();
   });
 });

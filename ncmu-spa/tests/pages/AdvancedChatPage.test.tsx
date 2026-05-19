@@ -234,7 +234,11 @@ describe("<AdvancedChatPage> (TASK-75)", () => {
       timestamp: "2026-05-18T01:00:01Z",
       data: {
         status: "timeout",
-        outputs: {},
+        // TASK-G (B-NEW-54): partial answer mock — Dify v1.13.3 timeout may
+        // carry `outputs.answer` non-empty (real prod path). Strengthens
+        // silent-fallthrough reverse on form-mode pages; chat-mode keeps
+        // byte-exact same mock for cross-component contract symmetry.
+        outputs: { answer: "部分回答（被中断）" },
         error: "upstream timeout: TimeoutException('read timeout')",
       },
     };
@@ -326,7 +330,10 @@ describe("<AdvancedChatPage> (TASK-75)", () => {
       timestamp: "2026-05-19T01:00:01Z",
       data: {
         status: "stopped",
-        outputs: {},
+        // TASK-G (B-NEW-54): partial answer mock — Dify v1.13.3 stopped may
+        // carry `outputs.answer` non-empty (user-cancelled partial run).
+        // Strengthens silent-fallthrough reverse on form-mode pages.
+        outputs: { answer: "部分回答（被中断）" },
         error: "Run stopped by user",
       },
     };
