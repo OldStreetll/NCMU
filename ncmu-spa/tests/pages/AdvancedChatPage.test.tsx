@@ -256,4 +256,96 @@ describe("<AdvancedChatPage> (TASK-75)", () => {
     // (字段级 — 守 memory `feedback_pre_existing_error_strict_validation`).
     errorSpy.mockRestore();
   });
+
+  // TASK-F (B-NEW-53) — regression lock: status='exception' → '运行异常' must
+  // survive the 4-way nested-ternary expansion in src/pages/AdvancedChatPage.tsx:64.
+  // Without this lock, a typo in the new 'stopped' branch could silently
+  // collapse the exception branch (now in the middle of a 4-way ternary)
+  // into "运行已停止". test_e1 already locks 'failed' / test_e2 locks
+  // 'timeout' — 'exception' is the only previously-uncovered middle branch
+  // and the most-at-risk position during the 4-way expansion.
+  it("test_f1_status_exception_unchanged_behavior — exception envelope still maps to '运行异常'", async () => {
+    const { notification } = await import("antd");
+    const errorSpy = vi
+      .spyOn(notification, "error")
+      .mockImplementation(() => undefined);
+
+    renderAt("/apps/test-app-id/chatflow");
+    await waitFor(() => expect(chatWindowSpy).toHaveBeenCalled());
+
+    const props = lastChatWindowProps();
+    const onNcmuEvent = props.onNcmuEvent as (evt: NcmuSseEvent) => void;
+
+    const errEvt: NcmuSseEvent = {
+      event_type: "workflow_finished",
+      run_id: "f1f1f1f1-f1f1-4f1f-8f1f-f1f1f1f1f1f1",
+      timestamp: "2026-05-19T01:00:00Z",
+      data: {
+        status: "exception",
+        outputs: {},
+        error: "internal orchestrator panic",
+      },
+    };
+
+    await act(async () => {
+      onNcmuEvent(errEvt);
+    });
+
+    expect(errorSpy).toHaveBeenCalledTimes(1);
+    expect(errorSpy.mock.calls[0]![0]).toEqual(
+      expect.objectContaining({
+        message: "运行异常",
+        description: "internal orchestrator panic",
+      }),
+    );
+    errorSpy.mockRestore();
+  });
+
+  // TASK-F (B-NEW-53) — new branch: status='stopped' must NOT silent
+  // fallthrough into the success path. backend Pydantic Literal pre-existing
+  // contains 'stopped' (schemas/sse_events.py:120 / 4-stack since v3.3.1)
+  // but 4 page in-flight handler OR clause was missing the branch → when a
+  // workflow is stopped (user cancel / Dify /stop API), chat-mode page sees
+  // no visible feedback / form-mode renders empty output (silent UX
+  // fallthrough). INDEP TASK-D M2 candidate B-NEW-53 升级实施。
+  it("test_f2_status_stopped_shows_stopped_message — stopped envelope shows '运行已停止'", async () => {
+    const { notification } = await import("antd");
+    const errorSpy = vi
+      .spyOn(notification, "error")
+      .mockImplementation(() => undefined);
+
+    renderAt("/apps/test-app-id/chatflow");
+    await waitFor(() => expect(chatWindowSpy).toHaveBeenCalled());
+
+    const props = lastChatWindowProps();
+    const onNcmuEvent = props.onNcmuEvent as (evt: NcmuSseEvent) => void;
+
+    const stoppedEvt: NcmuSseEvent = {
+      event_type: "workflow_finished",
+      run_id: "f2f2f2f2-f2f2-4f2f-8f2f-f2f2f2f2f2f2",
+      timestamp: "2026-05-19T01:00:01Z",
+      data: {
+        status: "stopped",
+        outputs: {},
+        error: "Run stopped by user",
+      },
+    };
+
+    await act(async () => {
+      onNcmuEvent(stoppedEvt);
+    });
+
+    // (a) showError called exactly once (not silent fallthrough into success path)
+    expect(errorSpy).toHaveBeenCalledTimes(1);
+    // (b) message literal "运行已停止" — NOT "上游错误" / "运行异常" / "运行超时"
+    expect(errorSpy.mock.calls[0]![0]).toEqual(
+      expect.objectContaining({
+        message: "运行已停止",
+        description: "Run stopped by user",
+      }),
+    );
+    // (c/d) the error description carries backend's literal error string
+    // (字段级 — 守 memory `feedback_pre_existing_error_strict_validation`).
+    errorSpy.mockRestore();
+  });
 });

@@ -52,10 +52,16 @@ export function AdvancedChatPage() {
               // ("运行超时") so it does NOT silent-fallthrough into the
               // implicit success branch (which here is a no-op but on
               // form-mode pages would render an empty output).
+              // TASK-F (B-NEW-53): +'stopped' — backend Pydantic Literal
+              // pre-existing 4-stack ('stopped' has been in WorkflowFinishedData
+              // since v3.3.1 / TASK-D INDEP M2 立项 candidate B-NEW-53)，本次
+              // 闭环 SPA 侧 UX 显式分流为 "运行已停止"，避免与 TASK-E timeout
+              // 同型 silent fallthrough。
               if (
                 wf.status === "failed" ||
                 wf.status === "exception" ||
-                wf.status === "timeout"
+                wf.status === "timeout" ||
+                wf.status === "stopped"
               ) {
                 notification.error({
                   message:
@@ -63,7 +69,9 @@ export function AdvancedChatPage() {
                       ? "上游错误"
                       : wf.status === "exception"
                         ? "运行异常"
-                        : "运行超时",
+                        : wf.status === "timeout"
+                          ? "运行超时"
+                          : "运行已停止",
                   description: wf.error || "未知错误",
                 });
               }

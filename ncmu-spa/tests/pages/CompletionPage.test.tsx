@@ -547,4 +547,116 @@ describe("<CompletionPage>", () => {
     expect(screen.queryByText("（待执行）")).toBeInTheDocument();
     errorSpy.mockRestore();
   });
+
+  // TASK-F (B-NEW-53) — regression lock: status='exception' → '运行异常' must
+  // survive the 4-way nested-ternary expansion in src/pages/CompletionPage.tsx:112.
+  // Without this lock, a typo in the new 'stopped' branch could silently
+  // collapse the exception branch (now in the middle of a 4-way ternary)
+  // into "运行已停止". test_e1 already locks 'failed' / test_e2 locks
+  // 'timeout' — 'exception' is the only previously-uncovered middle branch
+  // and the most-at-risk position during the 4-way expansion.
+  it("test_f1_status_exception_unchanged_behavior — exception envelope still maps to '运行异常'", async () => {
+    mockUseAppParameters.mockReturnValue({
+      data: [
+        { variable: "topic", label: "主题", type: "text" },
+      ] as ParameterSchema[],
+      isLoading: false,
+      isError: false,
+      error: null,
+    });
+
+    const envelope: NcmuSseEvent = {
+      event_type: "workflow_finished",
+      run_id: "f1f1f1f1-f1f1-4f1f-8f1f-f1f1f1f1f1f1",
+      timestamp: "2026-05-19T01:00:00Z",
+      data: {
+        status: "exception",
+        outputs: {},
+        error: "internal orchestrator panic",
+      },
+    };
+    mockRunWorkflow.mockImplementation(async (_a, _v, onChunk) => {
+      onChunk(envelope);
+    });
+    const errorSpy = vi
+      .spyOn(notification, "error")
+      .mockImplementation(() => undefined);
+
+    renderAt();
+    const submitBtn = screen.getByRole("button", { name: /提\s?交/ });
+    fireEvent.click(submitBtn);
+
+    await waitFor(() => {
+      expect(errorSpy).toHaveBeenCalledTimes(1);
+    });
+    expect(errorSpy.mock.calls[0]![0]).toEqual(
+      expect.objectContaining({
+        message: "运行异常",
+        description: "internal orchestrator panic",
+      }),
+    );
+    await waitFor(() => {
+      expect(submitBtn.className).not.toContain("ant-btn-loading");
+    });
+    errorSpy.mockRestore();
+  });
+
+  // TASK-F (B-NEW-53) — new branch: status='stopped' must NOT silent
+  // fallthrough into the success path (which would attempt to read
+  // wf.outputs.answer = empty → render an empty Card, clobbering prior
+  // output). INDEP TASK-D M2 candidate B-NEW-53 升级实施。本 test 锁定
+  // fix 后 stopped → "运行已停止" toast + 输出区不被 silent setOutput。
+  it("test_f2_status_stopped_shows_stopped_message — stopped envelope shows '运行已停止'", async () => {
+    mockUseAppParameters.mockReturnValue({
+      data: [
+        { variable: "topic", label: "主题", type: "text" },
+      ] as ParameterSchema[],
+      isLoading: false,
+      isError: false,
+      error: null,
+    });
+
+    const envelope: NcmuSseEvent = {
+      event_type: "workflow_finished",
+      run_id: "f2f2f2f2-f2f2-4f2f-8f2f-f2f2f2f2f2f2",
+      timestamp: "2026-05-19T01:00:01Z",
+      data: {
+        status: "stopped",
+        outputs: {},
+        error: "Run stopped by user",
+      },
+    };
+    mockRunWorkflow.mockImplementation(async (_a, _v, onChunk) => {
+      onChunk(envelope);
+    });
+    const errorSpy = vi
+      .spyOn(notification, "error")
+      .mockImplementation(() => undefined);
+
+    renderAt();
+    const submitBtn = screen.getByRole("button", { name: /提\s?交/ });
+    fireEvent.click(submitBtn);
+
+    // (a) showError called exactly once (not silent fallthrough)
+    await waitFor(() => {
+      expect(errorSpy).toHaveBeenCalledTimes(1);
+    });
+    // (b) message literal "运行已停止" — NOT "上游错误" / "运行异常" / "运行超时"
+    expect(errorSpy.mock.calls[0]![0]).toEqual(
+      expect.objectContaining({
+        message: "运行已停止",
+        description: "Run stopped by user",
+      }),
+    );
+    // (c) submitting settles — the onChunk branch sets it to false before
+    // the page's finally also fires.
+    await waitFor(() => {
+      expect(submitBtn.className).not.toContain("ant-btn-loading");
+    });
+    // (d) output region NOT populated with success content (silent
+    // fallthrough check — placeholder remains since the success branch
+    // does not fire on stopped).
+    expect(screen.queryByText("（待执行）")).toBeInTheDocument();
+    errorSpy.mockRestore();
+  });
 });

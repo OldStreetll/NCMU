@@ -81,10 +81,14 @@ export function AgentChatPage() {
               const wf = canonical.data as WorkflowFinishedData;
               // TASK-E (B-NEW-52): see AdvancedChatPage.tsx for the
               // 'timeout' rationale.
+              // TASK-F (B-NEW-53): see AdvancedChatPage.tsx for the
+              // 'stopped' rationale — pre-existing backend Literal 4-stack
+              // 同型 silent fallthrough gap，闭环 UX 显式分流。
               if (
                 wf.status === "failed" ||
                 wf.status === "exception" ||
-                wf.status === "timeout"
+                wf.status === "timeout" ||
+                wf.status === "stopped"
               ) {
                 notification.error({
                   message:
@@ -92,7 +96,9 @@ export function AgentChatPage() {
                       ? "上游错误"
                       : wf.status === "exception"
                         ? "运行异常"
-                        : "运行超时",
+                        : wf.status === "timeout"
+                          ? "运行超时"
+                          : "运行已停止",
                   description: wf.error || "未知错误",
                 });
               }

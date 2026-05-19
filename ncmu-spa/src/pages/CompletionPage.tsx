@@ -102,10 +102,14 @@ export function CompletionPage() {
           // from outputs.answer, which is empty on timeout → would render
           // an empty Card (silent UX fallthrough). INDEP TASK-D 主审盲区
           // #11 「用户体验完整路径」实证。
+          // TASK-F (B-NEW-53): +'stopped' — pre-existing 4-stack Literal
+          // 同型 silent fallthrough gap（else 分支会 setOutput(空 answer)
+          // 即 clobber 上次输出为空 Card）/ 闭环 UX 显式分流 "运行已停止"。
           if (
             wf.status === "failed" ||
             wf.status === "exception" ||
-            wf.status === "timeout"
+            wf.status === "timeout" ||
+            wf.status === "stopped"
           ) {
             notification.error({
               message:
@@ -113,7 +117,9 @@ export function CompletionPage() {
                   ? "上游错误"
                   : wf.status === "exception"
                     ? "运行异常"
-                    : "运行超时",
+                    : wf.status === "timeout"
+                      ? "运行超时"
+                      : "运行已停止",
               description: wf.error || "未知错误",
             });
           } else {
