@@ -51,7 +51,15 @@ export function AgentChatPage() {
           pages only carry output (chat bubble area) + history (thoughts /
           tool calls sider) because they have no DynamicInputForm / submit
           button at the page level (input lives inside ChatWindow / ChatInput).
-          既有 `agent-chat-sider-tabs` / `tool-call-list` 保留。 */}
+          既有 `agent-chat-sider-tabs` / `tool-call-list` 保留。
+          TASK-CLEAN-5 (B-NEW-35 决策 Path A "补测试"): page-level landmark
+          contract 锁定 — agent-chat-output / agent-chat-history /
+          agent-chat-sider-tabs / agent-thought-timeline / tool-call-list 共
+          5 个 page-level testid 由 AgentChatPage.test.tsx 字面断言
+          (test_cleanup_5_*)。Path A 选自 b_new_backlog_inventory.md §line
+          121 "删 or 补测试" source-of-truth；4 个既有 testid 沿用
+          TASK-C/commit b5e5b0f 实施，仅新增 agent-thought-timeline 包装
+          AgentThoughtTimeline (sider 默认 tab) 以补齐 plan §AC#2 字面例举。 */}
       <Layout.Content
         style={{ flex: 2, padding: 16, minHeight: 0 }}
         data-testid="agent-chat-output"
@@ -118,7 +126,11 @@ export function AgentChatPage() {
             {
               key: "thoughts",
               label: "Agent Thoughts",
-              children: <AgentThoughtTimeline thoughts={thoughts} />,
+              children: (
+                <div data-testid="agent-thought-timeline">
+                  <AgentThoughtTimeline thoughts={thoughts} />
+                </div>
+              ),
             },
             {
               key: "tools",

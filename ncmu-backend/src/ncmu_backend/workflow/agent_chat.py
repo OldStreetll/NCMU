@@ -43,6 +43,12 @@ from ncmu_backend.workflow._base import BaseOrchestrator
 from ncmu_backend.workflow.dify_client import DifyStreamClient
 
 
+# B-NEW-43 (TASK-CLEAN-3): per-call mitigation delay for Dify Agent app's
+# state-machine contention under concurrent batch invocations. Module-level
+# constant so test suite can patch it to 0 without literal-value coupling.
+_BATCH_MITIGATION_DELAY_S = 0.5
+
+
 class AgentChatOrchestrator(BaseOrchestrator):
     """agent-chat (Dify Agent App with tool-calls) orchestrator."""
 
@@ -63,6 +69,21 @@ class AgentChatOrchestrator(BaseOrchestrator):
             "response_mode": "streaming",
             "conversation_id": inputs.get("conversation_id", ""),
         }
+        # B-NEW-43 (INDEP-PHASE2B P2 / TASK-CLEAN-3): Dify Agent app's
+        # /v1/chat-messages endpoint exhibits state-machine contention when
+        # N>=3 concurrent calls share a user_id (observed in Phase 2B B4 e2e
+        # batch mode). A fixed pre-stream sleep yields to the event loop so
+        # concurrent invocations are naturally staggered. Per-mode user
+        # suffix was considered but rejected: it would pollute Dify-side
+        # analytics aggregation by raw user_id and break conversation_id
+        # continuity for any rows historically created with the bare uuid.
+        # Single-call overhead 500ms is acceptable here — agent-chat is a
+        # multi-step tool-call mode where single response typically takes
+        # 5-30s (1-10% increment, perceptually inert). Placed before the
+        # try/except so CancelledError during the wait propagates naturally
+        # without engaging the finally yield path (see feedback_async_gen_
+        # finally_yield_double_bug).
+        await asyncio.sleep(_BATCH_MITIGATION_DELAY_S)
         accumulated_text = ""
         emitted_terminal = False  # TASK-B: dedup sentinel — at most 1 terminal envelope per run
         cancelled = False  # REWORK-INDEP-I-1: gate finally yield on cancellation path

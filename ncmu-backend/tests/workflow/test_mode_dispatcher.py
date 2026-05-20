@@ -334,3 +334,80 @@ def test_default_token_never_evicted():
 
     assert "default-token" in d._client_cache
     assert d.get_client("default-token") is default
+
+
+# =====================================================================
+# B-NEW-45 — per-app-id WARN-once TTL suppression for NULL token fallback
+# ---------------------------------------------------------------------
+# Phase 1 backward-compat (IMP-INDEP-1 / TASK-A) logs ``log.warning`` every
+# time ``dify_apps.api_token`` is NULL/empty. Under continuous traffic
+# this becomes N non-actionable log lines per minute per app. These
+# tests pin the new suppression: the warning fires at most once per
+# app_id per TTL window; the underlying fallback behaviour is unchanged.
+# =====================================================================
+
+
+async def test_resolve_token_null_warns_once_within_ttl(caplog):
+    """5 repeated NULL-token resolutions for the same app_id emit
+    exactly 1 ``backfill`` warning — not 5 — because the second through
+    fifth calls fall inside the TTL window of the first."""
+    dispatcher = _make_dispatcher(default_token="default-chat-token")
+    fake_db = _fake_db_with_row((None,))
+
+    with caplog.at_level(logging.WARNING, logger="ncmu_backend.workflow.mode_dispatcher"):
+        for _ in range(5):
+            token = await dispatcher.resolve_token(fake_db, "app-chat-kb")
+            assert token == "default-chat-token"  # fallback behaviour unchanged
+
+    backfill = [r for r in caplog.records if "backfill" in r.message]
+    assert len(backfill) == 1, (
+        f"expected exactly 1 'backfill' warning across 5 NULL resolutions "
+        f"within TTL; got {len(backfill)}: {[r.message for r in backfill]}"
+    )
+
+
+async def test_resolve_token_null_warns_per_app_id(caplog):
+    """Two distinct app_ids each get their own warning — the TTL is keyed
+    per app_id, not global. Three calls per app, six total, → 2 warnings."""
+    dispatcher = _make_dispatcher(default_token="default-chat-token")
+    fake_db = _fake_db_with_row((None,))
+
+    with caplog.at_level(logging.WARNING, logger="ncmu_backend.workflow.mode_dispatcher"):
+        for _ in range(3):
+            await dispatcher.resolve_token(fake_db, "app-A")
+            await dispatcher.resolve_token(fake_db, "app-B")
+
+    backfill = [r for r in caplog.records if "backfill" in r.message]
+    # Each app_id appears in its own warning's args (%s, %s twice).
+    apps_warned = {r.args[0] for r in backfill}
+    assert apps_warned == {"app-A", "app-B"}, (
+        f"expected one warning each for app-A + app-B; got args={[r.args for r in backfill]}"
+    )
+    assert len(backfill) == 2, (
+        f"expected 2 warnings (1 per distinct app_id within TTL); got {len(backfill)}"
+    )
+
+
+async def test_resolve_token_null_warns_again_after_ttl_expiry(caplog, monkeypatch):
+    """When the TTL window expires (simulated by advancing the monotonic
+    clock), the next NULL-token resolution warns again — suppression is
+    time-bounded, not permanent."""
+    import time
+    dispatcher = _make_dispatcher(default_token="default-chat-token")
+    fake_db = _fake_db_with_row((None,))
+
+    # Patch the dispatcher's clock source — pinning to a tuple lets us
+    # advance "time" deterministically without sleeping.
+    fake_now = [1000.0]
+    monkeypatch.setattr(time, "monotonic", lambda: fake_now[0])
+
+    with caplog.at_level(logging.WARNING, logger="ncmu_backend.workflow.mode_dispatcher"):
+        await dispatcher.resolve_token(fake_db, "app-X")  # warn #1
+        await dispatcher.resolve_token(fake_db, "app-X")  # suppressed
+        fake_now[0] += 61.0  # past the 60 s TTL
+        await dispatcher.resolve_token(fake_db, "app-X")  # warn #2
+
+    backfill = [r for r in caplog.records if "backfill" in r.message]
+    assert len(backfill) == 2, (
+        f"expected 2 warnings (1 before TTL expiry, 1 after); got {len(backfill)}"
+    )

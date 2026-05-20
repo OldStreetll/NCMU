@@ -59,6 +59,8 @@ async def sync_apps_client(app_client):
 # (a) mock returns 3 → upserted=3, total_console=3
 # --------------------------------------------------------------------- #
 async def test_sync_apps_upserts_three_rows(sync_apps_client, jwt_token):
+    from ncmu_backend.config import get_settings
+
     client, _dcc = sync_apps_client
     payload = {
         "data": [
@@ -68,7 +70,7 @@ async def test_sync_apps_upserts_three_rows(sync_apps_client, jwt_token):
         ],
     }
     with respx.mock(assert_all_called=True) as rx:
-        rx.get(url__regex=r".*/console/api/apps.*").mock(
+        route = rx.get(url__regex=r".*/console/api/apps.*").mock(
             return_value=Response(200, json=payload)
         )
         resp = await client.post(
@@ -78,6 +80,16 @@ async def test_sync_apps_upserts_three_rows(sync_apps_client, jwt_token):
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body == {"upserted": 3, "total_console": 3}
+    # B-NEW-47: lock outbound Dify Console headers verbatim. Pins both
+    # the header NAMES ("Authorization" / "X-WORKSPACE-ID") and the
+    # VALUES (Bearer scheme + ``DIFY_CONSOLE_API_KEY`` / ``DIFY_TENANT_ID``
+    # from Settings). Guards against header-name typos and
+    # value-source mix-ups (same class as the dev-login
+    # ``username``→``user_id`` cross-stack field error).
+    settings = get_settings()
+    sent = route.calls[0].request
+    assert sent.headers.get("Authorization") == f"Bearer {settings.DIFY_CONSOLE_API_KEY}"
+    assert sent.headers.get("X-WORKSPACE-ID") == settings.DIFY_TENANT_ID
 
 
 # --------------------------------------------------------------------- #
@@ -163,6 +175,8 @@ async def test_sync_apps_non_admin_returns_403(sync_apps_client, jwt_secret):
 #       then real fetch upstream (NOT served from cached entry)
 # --------------------------------------------------------------------- #
 async def test_sync_apps_invalidates_cache_before_fetch(sync_apps_client, jwt_token):
+    from ncmu_backend.config import get_settings
+
     client, dcc = sync_apps_client
 
     invalidate_calls: list = []
@@ -208,3 +222,15 @@ async def test_sync_apps_invalidates_cache_before_fetch(sync_apps_client, jwt_to
         "sync_apps must bypass the per-user TTL cache; expected upstream "
         f"hit twice but got {route.call_count}"
     )
+    # B-NEW-47: both outbound calls (GET /apps + POST /sync_apps' refetch)
+    # MUST carry the same Bearer + X-WORKSPACE-ID — locks the consistent
+    # contract across the two code paths that share ``DifyConsoleClient``.
+    settings = get_settings()
+    for i, call in enumerate(route.calls):
+        sent = call.request
+        assert sent.headers.get("Authorization") == f"Bearer {settings.DIFY_CONSOLE_API_KEY}", (
+            f"call #{i} missing Bearer header"
+        )
+        assert sent.headers.get("X-WORKSPACE-ID") == settings.DIFY_TENANT_ID, (
+            f"call #{i} missing X-WORKSPACE-ID header"
+        )

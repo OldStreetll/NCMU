@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 import uuid
 from collections import OrderedDict
 from typing import Any, AsyncIterator
@@ -42,6 +43,12 @@ class ModeDispatcher:
     本 dispatcher 仅 4 新 mode：advanced-chat / completion / workflow /
     agent-chat。B2 task TASK-71/72/73/74 各 register 一个 orchestrator.
     """
+
+    # B-NEW-45: per-app-id WARN-once suppression window for NULL-token
+    # fallback. ``log.warning`` in resolve_token fires at most once per
+    # app_id per window; under continuous traffic (N reqs/min for the
+    # same App) this caps the noise at 1 warning/min/App instead of N.
+    _NULL_TOKEN_WARN_TTL_S = 60.0
 
     def __init__(
         self,
@@ -77,6 +84,10 @@ class ModeDispatcher:
             else int(os.environ.get("DISPATCHER_CACHE_MAX_SIZE", "32"))
         )
         self._registry: dict[str, BaseOrchestrator] = {}
+        # B-NEW-45: app_id -> monotonic timestamp of last NULL-token warning.
+        # Checked + updated by resolve_token to silence repeat warnings
+        # within ``_NULL_TOKEN_WARN_TTL_S``.
+        self._null_token_warned_at: dict[str, float] = {}
 
     def register(self, mode: str, orchestrator: BaseOrchestrator) -> None:
         if mode in self._registry:
@@ -132,13 +143,22 @@ class ModeDispatcher:
             # behaviour still degrades gracefully (chat App's token is
             # harmless for chat itself, will 401 against a different App's
             # endpoint — which is the visible signal that a backfill is due).
-            log.warning(
-                "resolve_token: app_id=%s has NULL/empty api_token; falling "
-                "back to default chat App token. If this is NOT the Phase 1 "
-                "chat App, Boss must backfill: UPDATE dify_apps SET "
-                "api_token='<per-App token>' WHERE dify_app_id='%s'",
-                app_id, app_id,
-            )
+            #
+            # B-NEW-45: per-app-id WARN-once within ``_NULL_TOKEN_WARN_TTL_S``.
+            # ``time.monotonic`` (not wall-clock) so the suppression window
+            # is immune to system clock skew; resolved via the module to keep
+            # the call ``monkeypatch``-able in tests.
+            now = time.monotonic()
+            last = self._null_token_warned_at.get(app_id, 0.0)
+            if now - last >= self._NULL_TOKEN_WARN_TTL_S:
+                log.warning(
+                    "resolve_token: app_id=%s has NULL/empty api_token; falling "
+                    "back to default chat App token. If this is NOT the Phase 1 "
+                    "chat App, Boss must backfill: UPDATE dify_apps SET "
+                    "api_token='<per-App token>' WHERE dify_app_id='%s'",
+                    app_id, app_id,
+                )
+                self._null_token_warned_at[app_id] = now
             return self._default_client.api_key
         return token
 
@@ -168,21 +188,22 @@ class ModeDispatcher:
         )
         self._client_cache[token] = client
 
-        # Eviction: total capacity = max_size non-default + 1 default 永驻.
+        # B-NEW-48: eviction with ``popitem(last=False)`` — pops the LRU
+        # entry; if it is the anchored default, re-insert it at MRU and
+        # retry on the next-oldest. Functionally equivalent to the prior
+        # ``while + for k in list(...): ... else: break`` form but with
+        # one O(1) op per iteration and no per-pass ``list(...)``
+        # snapshot. Total capacity is ``max_size`` non-default + 1
+        # default 永驻.
         while len(self._client_cache) > self._max_size + 1:
-            # Find the oldest entry that is not the anchored default and
-            # drop it. Iterating insertion order (OrderedDict default)
-            # yields LRU first; snapshot via ``list`` so the iterator
-            # never sees the mutation we make inside.
-            for k in list(self._client_cache):
-                if k != self._default_token:
-                    del self._client_cache[k]
-                    break
-            else:
-                # Only the default remains (cannot really happen given
-                # we just inserted a non-default token, but bail safely
-                # rather than loop forever).
-                break
+            oldest_token, oldest_client = self._client_cache.popitem(last=False)
+            if oldest_token == self._default_token:
+                # Default is anchored — re-insert (goes to MRU end) and
+                # let the next loop iteration examine the actual LRU
+                # non-default entry. With only one default in the cache
+                # this loop terminates after at most one re-insert per
+                # eviction pass.
+                self._client_cache[oldest_token] = oldest_client
 
         return client
 
