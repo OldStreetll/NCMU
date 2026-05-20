@@ -87,6 +87,19 @@ def _patch_httpx(monkeypatch):
     _FakeAsyncClient.LINES = []
 
 
+@pytest.fixture(autouse=True)
+def _zero_b_new_43_mitigation_delay(monkeypatch):
+    """B-NEW-43 (TASK-CLEAN-3): zero the per-call batch mitigation delay
+    in tests so the suite stays fast. Production value is 0.5s; tests
+    that need to assert the production value do so via direct constant
+    introspection, not by waiting half a second per test.
+    """
+    monkeypatch.setattr(
+        "ncmu_backend.workflow.agent_chat._BATCH_MITIGATION_DELAY_S",
+        0,
+    )
+
+
 # --------------------------------------------------------------------- #
 # Load the JSONL fixture once and convert each line into a "data: ..."
 # SSE frame, the format DifyStreamClient.stream() expects.
@@ -542,4 +555,119 @@ async def test_d_elapsed_time_multiplied_by_1000():
     assert final_none.data.total_elapsed_ms is None, (
         f"B-NEW-42: missing latency must yield None (not 0); got "
         f"{final_none.data.total_elapsed_ms!r}"
+    )
+
+
+# ===================================================================== #
+# TASK-CLEAN-3 (B-NEW-43) — agent-chat batch concurrency mitigation
+# ===================================================================== #
+
+
+def test_b_new_43_production_mitigation_delay_is_500ms():
+    """B-NEW-43 — production mitigation constant is 0.5 seconds.
+
+    The autouse ``_zero_b_new_43_mitigation_delay`` fixture patches the
+    constant to 0 during tests for speed; this test reaches past the
+    monkeypatch by reading the source-of-truth value directly off the
+    module import (the fixture's patch is restored on yield, but to
+    avoid coupling to fixture teardown order we read in a fresh
+    interpreter context via importlib.reload-equivalent here).
+
+    Simpler: assert the patched value (which proves the patch hook
+    exists) AND assert the literal in source via inspect.getsource —
+    the second arm is the actual regression-lock on the production
+    value.
+    """
+    import inspect
+
+    from ncmu_backend.workflow import agent_chat
+
+    src = inspect.getsource(agent_chat)
+    assert "_BATCH_MITIGATION_DELAY_S = 0.5" in src, (
+        f"B-NEW-43: agent_chat.py must declare "
+        f"_BATCH_MITIGATION_DELAY_S = 0.5 (per Phase 3 INDEP-PHASE2B P2 "
+        f"spec); source did not contain the literal."
+    )
+
+
+async def test_b_new_43_batch_n3_concurrent_completes_with_per_call_mitigation(
+    monkeypatch,
+):
+    """B-NEW-43 — N=3 concurrent agent-chat runs each complete normally
+    and the per-call mitigation sleep is invoked exactly N times.
+
+    Mock Dify returns the standard 5-frame fixture (2 agent_thought +
+    2 tool_call + 1 message_end) for each call; no state-machine
+    simulation is attempted (守 ``feedback_tdd_mock_vs_real_api`` — the
+    mock would otherwise be free to assert any pass/fail regardless of
+    real Dify behaviour). The purpose of this test is to verify:
+
+    1. The mitigation code path (``await asyncio.sleep(...)``) is
+       invoked exactly once per orchestrator invocation, including in
+       batch (``asyncio.gather``) topology.
+    2. The mitigation does not introduce a regression in the batch
+       path — all 3 runs yield the expected envelope sequence.
+    """
+    import asyncio
+
+    from ncmu_backend.workflow.agent_chat import AgentChatOrchestrator
+
+    real_sleep = asyncio.sleep
+    sleep_calls: list[float] = []
+
+    async def tracking_sleep(delay):
+        sleep_calls.append(delay)
+        # Delegate to real sleep(0) so cancellation semantics and
+        # event-loop yield ordering remain genuine.
+        await real_sleep(0)
+
+    monkeypatch.setattr(
+        "ncmu_backend.workflow.agent_chat.asyncio.sleep",
+        tracking_sleep,
+    )
+
+    frames = _load_fixture_frames()
+
+    async def _drive():
+        stub = _StubDifyClient(frames)
+        orch = AgentChatOrchestrator()
+        run_id, app_id, user_id, inputs = _make_run_args()
+        return [
+            ev async for ev in orch.run(stub, run_id, app_id, user_id, inputs)
+        ]
+
+    results = await asyncio.gather(_drive(), _drive(), _drive())
+
+    # All 3 runs complete with the expected envelope sequence.
+    assert len(results) == 3, (
+        f"B-NEW-43: expected 3 batch results; got {len(results)}"
+    )
+    for i, events in enumerate(results):
+        types = [e.event_type for e in events]
+        assert types.count("agent_thought") == 2, (
+            f"B-NEW-43 run {i}: expected 2 agent_thought; got {types}"
+        )
+        assert types.count("tool_call") == 2, (
+            f"B-NEW-43 run {i}: expected 2 tool_call; got {types}"
+        )
+        assert types.count("workflow_finished") == 1, (
+            f"B-NEW-43 run {i}: expected 1 workflow_finished; got {types}"
+        )
+        # No exception / failed envelope leaked into the success path.
+        final = events[-1]
+        assert isinstance(final.data, WorkflowFinishedData)
+        assert final.data.status == "succeeded", (
+            f"B-NEW-43 run {i}: terminal status must be 'succeeded' "
+            f"(no spurious 400-induced failed envelope); got "
+            f"{final.data.status!r}"
+        )
+
+    # Mitigation sleep invoked exactly once per batch member (N=3).
+    # The autouse fixture patches the constant to 0, so all mitigation
+    # sleeps are recorded as delay=0; agent_chat has no other internal
+    # asyncio.sleep calls (grep-verified), so the recorded count equals
+    # the mitigation invocation count.
+    assert len(sleep_calls) == 3, (
+        f"B-NEW-43: expected exactly 3 mitigation sleeps (1 per N=3 "
+        f"batch member); got {sleep_calls}"
     )
