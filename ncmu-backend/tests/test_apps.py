@@ -344,7 +344,7 @@ async def test_list_apps_calls_dify_console_with_admin_key(
     # 模拟生产 NCMU/.env: DIFY_CONSOLE_API_KEY = ${DIFY_ADMIN_API_KEY} 同值
     # + DIFY_TENANT_ID (path B' — INDEP-FIX-DEPLOY-2).
     fake_admin_key = "test-admin-api-key-256bit-entropy-value"
-    fake_tenant_id = "fake-tenant-uuid-3d0c79e3-fed6-4c01-9dd9-a5f588632b22"
+    fake_tenant_id = "fake-tenant-uuid-00000000-0000-4000-8000-000000000000"
     monkeypatch.setenv("DIFY_CONSOLE_API_KEY", fake_admin_key)
     monkeypatch.setenv("DIFY_TENANT_ID", fake_tenant_id)
     # Settings is lru_cached; reset so the request-time Depends(get_settings)

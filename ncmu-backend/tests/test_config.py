@@ -33,7 +33,12 @@ REAL_DEFAULTS: dict[str, str] = {
     "NCMU_JWT_SECRET": "real-32byte-secret-from-openssl-rand-base64-32",
     "DIFY_CONSOLE_API_KEY": "real-dify-console-key",
     "DIFY_APP_DEFAULT_TOKEN": "real-dify-app-token",
-    "DIFY_TENANT_ID": "3d0c79e3-fed6-4c01-9dd9-a5f588632b22",
+    # B-NEW-49: was the live prod tenant UUID; swapped for an obviously-
+    # placeholder v4 UUID so this hygiene-test file never embeds a real
+    # production identifier. The string is still a syntactically valid
+    # UUID v4 (version nibble 4, variant nibble 8) so any downstream
+    # parsing/format check stays happy.
+    "DIFY_TENANT_ID": "00000000-0000-4000-8000-000000000000",
     "FASTGPT_API_KEY": "real-fastgpt-key",
     "SILICONFLOW_API_KEY": "real-siliconflow-key",
 }

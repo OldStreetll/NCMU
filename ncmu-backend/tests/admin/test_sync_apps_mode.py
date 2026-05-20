@@ -48,10 +48,12 @@ async def sync_apps_client(app_client):
 async def test_sync_apps_writes_mode_from_console(
     sync_apps_client, async_db, jwt_token,
 ):
+    from ncmu_backend.config import get_settings
+
     client, _dcc = sync_apps_client
     payload = {"data": [{"id": "app-adv", "name": "Adv", "mode": "advanced-chat"}]}
     with respx.mock(assert_all_called=True) as rx:
-        rx.get(url__regex=r".*/console/api/apps.*").mock(
+        route = rx.get(url__regex=r".*/console/api/apps.*").mock(
             return_value=Response(200, json=payload)
         )
         resp = await client.post(
@@ -67,6 +69,13 @@ async def test_sync_apps_writes_mode_from_console(
         )
     ).scalar_one()
     assert mode == "advanced-chat"
+    # B-NEW-47: outbound header lock — mirrors test_sync_apps.py case (a).
+    # Pins Bearer scheme + ``DIFY_CONSOLE_API_KEY`` / ``DIFY_TENANT_ID``
+    # field values; cross-component coverage with the sister test file.
+    settings = get_settings()
+    sent = route.calls[0].request
+    assert sent.headers.get("Authorization") == f"Bearer {settings.DIFY_CONSOLE_API_KEY}"
+    assert sent.headers.get("X-WORKSPACE-ID") == settings.DIFY_TENANT_ID
 
 
 # --------------------------------------------------------------------- #
@@ -102,12 +111,14 @@ async def test_sync_apps_defaults_mode_to_chat(
 async def test_sync_apps_updates_mode_on_conflict(
     sync_apps_client, async_db, jwt_token,
 ):
+    from ncmu_backend.config import get_settings
+
     client, _dcc = sync_apps_client
     v1 = {"data": [{"id": "app-evolve", "name": "Evolve", "mode": "chat"}]}
     v2 = {"data": [{"id": "app-evolve", "name": "Evolve", "mode": "workflow"}]}
 
     with respx.mock(assert_all_called=True) as rx:
-        rx.get(url__regex=r".*/console/api/apps.*").mock(
+        route = rx.get(url__regex=r".*/console/api/apps.*").mock(
             side_effect=[
                 Response(200, json=v1),
                 Response(200, json=v2),
@@ -131,3 +142,15 @@ async def test_sync_apps_updates_mode_on_conflict(
         )
     ).scalar_one()
     assert mode == "workflow"
+    # B-NEW-47: both outbound calls (UPDATE path's 2-shot) must carry the
+    # same Bearer + X-WORKSPACE-ID — locks invariant across the conflict
+    # resolution path.
+    settings = get_settings()
+    for i, call in enumerate(route.calls):
+        sent = call.request
+        assert sent.headers.get("Authorization") == f"Bearer {settings.DIFY_CONSOLE_API_KEY}", (
+            f"call #{i} missing Bearer header"
+        )
+        assert sent.headers.get("X-WORKSPACE-ID") == settings.DIFY_TENANT_ID, (
+            f"call #{i} missing X-WORKSPACE-ID header"
+        )

@@ -34,6 +34,51 @@ postgresql_noproc = factories.postgresql_noproc(
 postgresql = factories.postgresql("postgresql_noproc")
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _drop_stale_test_database():
+    """B-NEW-30: pre-drop any stale ``ncmu_test`` left from crashed prior runs.
+
+    pytest-postgresql's ``DatabaseJanitor`` only drops the test DB if the
+    opt-in ``--postgresql-drop-test-database`` CLI flag is passed
+    (``store_true`` in ``plugin.py``; default False). When the previous
+    pytest invocation died mid-test (Ctrl-C, SIGKILL, network glitch),
+    ``ncmu_test`` is left over and the next run errors with
+    ``psycopg.errors.DuplicateDatabase`` at the very first fixture setup
+    — masking whichever test you actually want to run.
+
+    This session-scoped autouse fixture terminates any leftover backends
+    still attached to ``ncmu_test`` and drops the database before the
+    session starts. Connection failures (postgres not up yet) are
+    swallowed so pytest-postgresql's own retry logic surfaces the real
+    error rather than this fixture's symptom.
+    """
+    import psycopg
+    admin_dsn = (
+        f"host={os.environ.get('PYTEST_PG_HOST', 'localhost')} "
+        f"port={os.environ.get('PYTEST_PG_PORT', '5432')} "
+        f"user={os.environ.get('PYTEST_PG_USER', 'ncmu_app')} "
+        f"password={os.environ.get('PYTEST_PG_PASSWORD', 'CHANGE_ME')} "
+        f"dbname=ncmu"
+    )
+    try:
+        with psycopg.connect(admin_dsn, autocommit=True) as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                "WHERE datname = 'ncmu_test' AND pid <> pg_backend_pid()"
+            )
+            cur.execute("DROP DATABASE IF EXISTS ncmu_test")
+    except psycopg.Error:
+        # Best-effort pre-cleanup: swallow ALL psycopg errors so this
+        # fixture's environment-dependent failures (postgres-not-up /
+        # ncmu-DB-absent / insufficient-privilege) don't block test
+        # sessions that don't even use postgres. pytest-postgresql's
+        # later fixtures will surface real infra errors with clearer
+        # messages.
+        pass
+    yield
+
+
 def _run_alembic(url: str, *args: str) -> None:
     """Run `alembic -c alembic.ini <args>` with NCMU_DB_URL set to `url`."""
     env = os.environ.copy()
