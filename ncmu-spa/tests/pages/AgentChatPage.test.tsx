@@ -91,6 +91,47 @@ describe("<AgentChatPage> (TASK-78)", () => {
     expect(screen.getByTestId("agent-thought-empty")).toBeInTheDocument();
   });
 
+  // TASK-CLEAN-5 (B-NEW-35) — page-level landmark contract. Four pre-existing
+  // testids from TASK-C/commit b5e5b0f (agent-chat-output / agent-chat-history
+  // / agent-chat-sider-tabs / tool-call-list) gain dedicated assertion + one
+  // new wrapper (agent-thought-timeline, page :121) closes the orphan-testid
+  // gap flagged in b_new_backlog_inventory.md §line 121. Path A "补测试"
+  // (source-of-truth in backlog) — no behavior change, downstream e2e suites
+  // get a stable landmark contract independent of antd Tabs internals.
+  it("test_cleanup_5_page_level_testid_landmarks — 5 testid 字面断言 (B-NEW-35)", async () => {
+    renderAt("/apps/test-app-id/agent");
+    await waitFor(() => expect(chatWindowSpy).toHaveBeenCalled());
+
+    // Landmark 1+2: output wraps the (mocked) ChatWindow main area.
+    const output = screen.getByTestId("agent-chat-output");
+    expect(output).toBeInTheDocument();
+    expect(
+      output.querySelector('[data-testid="mock-chat-window"]'),
+    ).not.toBeNull();
+
+    // Landmark 3+4: history sider wraps the antd Tabs strip.
+    const history = screen.getByTestId("agent-chat-history");
+    expect(history).toBeInTheDocument();
+    const siderTabs = screen.getByTestId("agent-chat-sider-tabs");
+    expect(siderTabs).toBeInTheDocument();
+    expect(
+      history.querySelector('[data-testid="agent-chat-sider-tabs"]'),
+    ).not.toBeNull();
+
+    // Landmark 5: agent-thought-timeline wrapper (newly added in this task)
+    // mounts on the default-active "thoughts" tab and contains the
+    // AgentThoughtTimeline empty-state.
+    const timeline = screen.getByTestId("agent-thought-timeline");
+    expect(timeline).toBeInTheDocument();
+    expect(
+      timeline.querySelector('[data-testid="agent-thought-empty"]'),
+    ).not.toBeNull();
+
+    // Note: `tool-call-list` is the 6th page-level landmark but antd Tabs
+    // lazy-mounts the inactive "Tool Calls" panel — covered by case (c)
+    // which clicks the tab and asserts the tool-call-card children mount.
+  });
+
   it("(b) onNcmuEvent push agent_thought → AgentThoughtTimeline 收 1 行", async () => {
     renderAt("/apps/test-app-id/agent");
     await waitFor(() => expect(chatWindowSpy).toHaveBeenCalled());
