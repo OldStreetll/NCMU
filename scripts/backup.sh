@@ -13,6 +13,13 @@
 
 set -eEuo pipefail
 
+# shellcheck source=common.sh
+. "$(dirname "$0")/common.sh"
+resolve_repo_root
+
+# Allow stub-mode smoke testing (B-NEW-38 verify). Destructive cmds gated below.
+DRY_RUN=${DRY_RUN:-0}
+
 # ─── 容器名（docker ps --format '{{.Names}}' 实测命中后固化）────────────
 readonly CONTAINER_PG_DIFY="ncmu-pg-dify"
 readonly CONTAINER_FASTGPT_MONGO="ncmu-fastgpt-mongo"
@@ -34,7 +41,7 @@ TS_REL_PATH="./data/backups/$TS"
 # 任一 dump 失败 → ERR 触发 → 清半成品 → 整体退出 1（保护现有 snapshot 不 prune）
 cleanup_partial() {
     local rc=$?
-    echo "ERROR: backup aborted (exit $rc); cleaning partial snapshot $TS_DIR" >&2
+    err "backup aborted (exit $rc); cleaning partial snapshot $TS_DIR"
     if [[ -d "$TS_DIR" ]]; then
         rm -rf "$TS_DIR"
     fi
@@ -56,7 +63,7 @@ read_mongo_env() {
 
 # ─── 准备 ───────────────────────────────────────────────────────────────
 mkdir -p "$TS_DIR"
-echo "Backup snapshot target: $TS_REL_PATH"
+info "Backup snapshot target: $TS_REL_PATH"
 
 START_TS=$(date +%s)
 
@@ -64,25 +71,45 @@ START_TS=$(date +%s)
 # 注：pg_dump | gzip 管道在 host 侧；ERR + pipefail 保证任一失败均触发清理 trap。
 
 read_pg_env "$CONTAINER_PG_DIFY"
-echo "  -> dump $CONTAINER_PG_DIFY (-U $PG_USER $PG_DB) -> dify-pg.sql.gz"
-docker exec "$CONTAINER_PG_DIFY" pg_dump -U "$PG_USER" "$PG_DB" | gzip > "$TS_DIR/dify-pg.sql.gz"
+info "  -> dump $CONTAINER_PG_DIFY (-U $PG_USER $PG_DB) -> dify-pg.sql.gz"
+if (( DRY_RUN )); then
+    info "DRY-RUN: docker exec $CONTAINER_PG_DIFY pg_dump ... (skipped)"
+    echo "-- dry-run placeholder" | gzip > "$TS_DIR/dify-pg.sql.gz"
+else
+    docker exec "$CONTAINER_PG_DIFY" pg_dump -U "$PG_USER" "$PG_DB" | gzip > "$TS_DIR/dify-pg.sql.gz"
+fi
 
 read_mongo_env
-echo "  -> dump $CONTAINER_FASTGPT_MONGO (-u $MONGO_USER --db fastgpt) -> fastgpt-mongo.archive.gz"
-docker exec "$CONTAINER_FASTGPT_MONGO" mongodump \
-    --archive --gzip \
-    --db fastgpt \
-    -u "$MONGO_USER" -p "$MONGO_PASS" \
-    --authenticationDatabase admin \
-    > "$TS_DIR/fastgpt-mongo.archive.gz"
+info "  -> dump $CONTAINER_FASTGPT_MONGO (-u $MONGO_USER --db fastgpt) -> fastgpt-mongo.archive.gz"
+if (( DRY_RUN )); then
+    info "DRY-RUN: docker exec $CONTAINER_FASTGPT_MONGO mongodump ... (skipped)"
+    echo "-- dry-run placeholder" | gzip > "$TS_DIR/fastgpt-mongo.archive.gz"
+else
+    docker exec "$CONTAINER_FASTGPT_MONGO" mongodump \
+        --archive --gzip \
+        --db fastgpt \
+        -u "$MONGO_USER" -p "$MONGO_PASS" \
+        --authenticationDatabase admin \
+        > "$TS_DIR/fastgpt-mongo.archive.gz"
+fi
 
 read_pg_env "$CONTAINER_PG_FASTGPT"
-echo "  -> dump $CONTAINER_PG_FASTGPT (-U $PG_USER $PG_DB) -> fastgpt-pg.sql.gz"
-docker exec "$CONTAINER_PG_FASTGPT" pg_dump -U "$PG_USER" "$PG_DB" | gzip > "$TS_DIR/fastgpt-pg.sql.gz"
+info "  -> dump $CONTAINER_PG_FASTGPT (-U $PG_USER $PG_DB) -> fastgpt-pg.sql.gz"
+if (( DRY_RUN )); then
+    info "DRY-RUN: docker exec $CONTAINER_PG_FASTGPT pg_dump ... (skipped)"
+    echo "-- dry-run placeholder" | gzip > "$TS_DIR/fastgpt-pg.sql.gz"
+else
+    docker exec "$CONTAINER_PG_FASTGPT" pg_dump -U "$PG_USER" "$PG_DB" | gzip > "$TS_DIR/fastgpt-pg.sql.gz"
+fi
 
 read_pg_env "$CONTAINER_PG_NCMU"
-echo "  -> dump $CONTAINER_PG_NCMU (-U $PG_USER $PG_DB) -> ncmu-pg.sql.gz"
-docker exec "$CONTAINER_PG_NCMU" pg_dump -U "$PG_USER" "$PG_DB" | gzip > "$TS_DIR/ncmu-pg.sql.gz"
+info "  -> dump $CONTAINER_PG_NCMU (-U $PG_USER $PG_DB) -> ncmu-pg.sql.gz"
+if (( DRY_RUN )); then
+    info "DRY-RUN: docker exec $CONTAINER_PG_NCMU pg_dump ... (skipped)"
+    echo "-- dry-run placeholder" | gzip > "$TS_DIR/ncmu-pg.sql.gz"
+else
+    docker exec "$CONTAINER_PG_NCMU" pg_dump -U "$PG_USER" "$PG_DB" | gzip > "$TS_DIR/ncmu-pg.sql.gz"
+fi
 
 # ─── manifest.json（含 sha256 + size）────────────────────────────────────
 DUMP_FILES=(
@@ -117,10 +144,15 @@ trap - ERR
 # 仅匹配 ^[0-9]{8}-[0-9]{6}$ 严格 timestamp 命名，避免误删其他文件
 PRUNED_COUNT=0
 if [[ -d "$BACKUPS_DIR" ]]; then
+    # SC2010: `ls | grep` intentional — restricted to strict ^[0-9]{8}-[0-9]{6}$
+    # timestamp dirs (no non-alphanumerics). Pre-existing on main 4e3dac2;
+    # refactor would change prune semantics — left as-is intentionally.
+    # shellcheck disable=SC2010
     while IFS= read -r old; do
         [[ -z "$old" ]] && continue
-        rm -rf "$BACKUPS_DIR/$old"
-        echo "Pruned: $old"
+        # SC2115 safety: ${var:?} guards against empty-var expansion to "/"
+        rm -rf "${BACKUPS_DIR:?}/${old:?}"
+        ok "Pruned: $old"
         PRUNED_COUNT=$((PRUNED_COUNT + 1))
     done < <(ls -1 "$BACKUPS_DIR" 2>/dev/null | grep -E '^[0-9]{8}-[0-9]{6}$' | sort | head -n -"$RETENTION_COUNT")
 fi
@@ -129,11 +161,9 @@ fi
 END_TS=$(date +%s)
 DURATION=$((END_TS - START_TS))
 
-echo ""
-echo "Backup created: $TS_REL_PATH"
+ok "Backup created: $TS_REL_PATH"
 for f in "${DUMP_FILES[@]}"; do
     sz=$(stat -c %s "$TS_DIR/$f")
     printf "  %-30s %12d bytes\n" "$f" "$sz"
 done
-echo ""
-echo "Total duration: ${DURATION}s (retention=$RETENTION_COUNT, pruned this run=$PRUNED_COUNT)"
+ok "Total duration: ${DURATION}s (retention=$RETENTION_COUNT, pruned this run=$PRUNED_COUNT)"

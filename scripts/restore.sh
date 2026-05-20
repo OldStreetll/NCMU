@@ -16,6 +16,13 @@
 
 set -eEuo pipefail
 
+# shellcheck source=common.sh
+. "$(dirname "$0")/common.sh"
+resolve_repo_root
+
+# Allow stub-mode smoke testing (B-NEW-38 verify). Destructive cmds gated below.
+DRY_RUN=${DRY_RUN:-0}
+
 # ─── 容器名（与 backup.sh 一致） ─────────────────────────────────────────
 readonly CONTAINER_PG_DIFY="ncmu-pg-dify"
 readonly CONTAINER_FASTGPT_MONGO="ncmu-fastgpt-mongo"
@@ -29,8 +36,7 @@ BACKUPS_DIR="$REPO_DIR/data/backups"
 
 # ─── AC#1：参数校验 ──────────────────────────────────────────────────────
 if [[ $# -lt 1 ]]; then
-    echo "Usage: restore.sh <timestamp>" >&2
-    exit 1
+    fail "Usage: restore.sh <timestamp>"
 fi
 
 TS="$1"
@@ -39,21 +45,19 @@ TS_REL_PATH="data/backups/$TS"
 
 # ─── AC#2：snapshot 存在性 ──────────────────────────────────────────────
 if [[ ! -d "$TS_DIR" ]]; then
-    echo "Snapshot not found: $TS_REL_PATH" >&2
-    exit 1
+    fail "Snapshot not found: $TS_REL_PATH"
 fi
 
 MANIFEST="$TS_DIR/manifest.json"
 if [[ ! -f "$MANIFEST" ]]; then
-    echo "Snapshot not found: $TS_REL_PATH (missing manifest.json)" >&2
-    exit 1
+    fail "Snapshot not found: $TS_REL_PATH (missing manifest.json)"
 fi
 
 # ─── AC#3(a)：sha256 校验（解析 manifest.json files[]） ─────────────────
 # manifest.json 由 backup.sh L95-111 写出，每个 file 对象一行：
 #   {"path": "xxx", "size_bytes": N, "sha256": "yyy"}
 # 用 grep + sed 提取 path/sha256（与 backup.sh 风格一致，不引入 jq 依赖）。
-echo "Verifying sha256 against manifest.json..."
+info "Verifying sha256 against manifest.json..."
 
 FAILED_FILES=()
 VERIFIED_COUNT=0
@@ -76,34 +80,32 @@ done < <(
 )
 
 if [[ ${#FAILED_FILES[@]} -gt 0 ]]; then
-    echo "ERROR: sha256 verification failed:" >&2
+    err "sha256 verification failed:"
     for f in "${FAILED_FILES[@]}"; do
-        echo "  - $f" >&2
+        err "  - $f"
     done
     exit 1
 fi
 
 if [[ $VERIFIED_COUNT -eq 0 ]]; then
-    echo "ERROR: manifest.json has no parseable file entries" >&2
-    exit 1
+    fail "manifest.json has no parseable file entries"
 fi
 
-echo "  -> sha256 OK ($VERIFIED_COUNT files)"
+ok "sha256 OK ($VERIFIED_COUNT files)"
 
 # ─── AC#3(b)：强制确认（destructive 警告） ──────────────────────────────
-echo "" >&2
-echo "⚠️  即将从 $TS_REL_PATH 恢复 4 个数据库，将覆盖所有现有数据：" >&2
-echo "    - $CONTAINER_PG_DIFY        <- dify-pg.sql.gz" >&2
-echo "    - $CONTAINER_FASTGPT_MONGO  <- fastgpt-mongo.archive.gz" >&2
-echo "    - $CONTAINER_PG_FASTGPT     <- fastgpt-pg.sql.gz" >&2
-echo "    - $CONTAINER_PG_NCMU        <- ncmu-pg.sql.gz" >&2
-echo "" >&2
+warn "即将从 $TS_REL_PATH 恢复 4 个数据库，将覆盖所有现有数据："
+# 缩进列表项保 plain printf（不加 [WARN] 前缀，design §4.3(d) 同 prompt 例外原则）
+printf '    - %s        <- %s\n' "$CONTAINER_PG_DIFY"       "dify-pg.sql.gz"           >&2
+printf '    - %s  <- %s\n'       "$CONTAINER_FASTGPT_MONGO" "fastgpt-mongo.archive.gz" >&2
+printf '    - %s     <- %s\n'    "$CONTAINER_PG_FASTGPT"    "fastgpt-pg.sql.gz"        >&2
+printf '    - %s        <- %s\n' "$CONTAINER_PG_NCMU"       "ncmu-pg.sql.gz"           >&2
+# 交互式 prompt 保留 plain printf（紧跟 read，[WARN] 前缀会让 prompt 文案混淆 / design §4.3(d) 例外）
 printf '输入 yes 确认恢复（覆盖当前数据）: \n' >&2
 IFS= read -r CONFIRM || CONFIRM=""
 
 if [[ "$CONFIRM" != "yes" ]]; then
-    echo "Cancelled" >&2
-    exit 1
+    fail "Cancelled"
 fi
 
 # ─── AC#3(c)(d)：4 个 restore 串行 + 部分失败处理 ────────────────────────
@@ -115,7 +117,11 @@ RESTORED=()  # 已成功恢复的容器名（含数据已被覆盖）
 restore_pg() {
     local container="$1"
     local file="$2"
-    echo "  -> restore $container <- $file"
+    info "  -> restore $container <- $file"
+    if (( DRY_RUN )); then
+        info "DRY-RUN: restore $container <- $file (skipped)"
+        return 0
+    fi
     gunzip -c "$TS_DIR/$file" \
         | docker exec -i "$container" sh -c 'psql -U "$POSTGRES_USER" "$POSTGRES_DB"'
 }
@@ -123,7 +129,11 @@ restore_pg() {
 restore_mongo() {
     local container="$1"
     local file="$2"
-    echo "  -> restore $container <- $file"
+    info "  -> restore $container <- $file"
+    if (( DRY_RUN )); then
+        info "DRY-RUN: restore $container <- $file (skipped)"
+        return 0
+    fi
     # Option A：host 不解压，原始 .gz 直接喂给容器内 mongorestore --gzip 自行解压
     # （单一压缩边界 + 与 backup.sh `mongodump --archive --gzip > x.gz` 对称；REWORK-38 修双解压 bug）
     docker exec -i "$container" sh -c 'mongorestore --archive --gzip --drop -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" --authenticationDatabase admin' \
@@ -132,26 +142,23 @@ restore_mongo() {
 
 handle_partial_failure() {
     local failed="$1"
-    echo "" >&2
-    echo "ERROR: restore failed at $failed" >&2
-    echo "  Restored (data already overwritten):" >&2
+    err "restore failed at $failed"
+    err "  Restored (data already overwritten):"
     if [[ ${#RESTORED[@]} -eq 0 ]]; then
-        echo "    (none)" >&2
+        err "    (none)"
     else
         for c in "${RESTORED[@]}"; do
-            echo "    - $c" >&2
+            err "    - $c"
         done
     fi
-    echo "  Failed: $failed" >&2
-    echo "" >&2
-    echo "  建议：检查 docker logs $failed 后从更早 snapshot 重试整体 restore" >&2
+    err "  Failed: $failed"
+    err "  建议：检查 docker logs $failed 后从更早 snapshot 重试整体 restore"
     exit 1
 }
 
 START_TS=$(date +%s)
 
-echo ""
-echo "Starting restore from $TS_REL_PATH (4 databases serial)..."
+info "Starting restore from $TS_REL_PATH (4 databases serial)..."
 
 # 顺序：dify-pg → fastgpt-mongo → fastgpt-pg → ncmu-pg（plan AC#3(c)）
 if restore_pg "$CONTAINER_PG_DIFY" "dify-pg.sql.gz"; then
@@ -182,8 +189,6 @@ fi
 END_TS=$(date +%s)
 DURATION=$((END_TS - START_TS))
 
-echo ""
-echo "Restore complete from $TS"
-echo "Total duration: ${DURATION}s"
-echo ""
-echo "请重启相关容器: docker compose restart ncmu-backend pg-dify fastgpt-mongo pg-fastgpt pg-ncmu"
+ok "Restore complete from $TS"
+ok "Total duration: ${DURATION}s"
+info "请重启相关容器: docker compose restart ncmu-backend pg-dify fastgpt-mongo pg-fastgpt pg-ncmu"

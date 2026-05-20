@@ -29,13 +29,19 @@
 # (memory feedback_bash_set_E_errtrace — NCMU TASK-37 backup.sh fix.)
 set -Eeuo pipefail
 
+# shellcheck source=common.sh
+. "$(dirname "$0")/common.sh"
+resolve_repo_root
+
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-readonly REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly ENV_FILE="$REPO_ROOT/.env"
 
-readonly DIFY_HOST_URL="http://localhost:8080"
+# DIFY_HOST_URL: read DIFY_PORT from .env (defaults to 8080 for backward-compat / B-NEW-37).
+# Declare-then-assign so command substitution exit code is not masked by readonly (SC2155).
+DIFY_HOST_URL="http://localhost:$(env_get DIFY_PORT 8080)"
+readonly DIFY_HOST_URL
 # Containers safely recreated by this script when found stopped.
 #   - nginx / dify-nginx / dify-ssrf-proxy: bind-mount goes stale after
 #     `wsl --shutdown` / Docker Desktop restart, exit 127.
@@ -82,15 +88,8 @@ TOK=""
 CSRF=""
 
 # ---------------------------------------------------------------------------
-# Logging + error trap
+# Error trap (logging helpers say/info/warn/ok/fail/skip come from common.sh)
 # ---------------------------------------------------------------------------
-say()   { printf '\n===== %s =====\n' "$*"; }
-info()  { printf '[INFO] %s\n' "$*"; }
-warn()  { printf '[WARN] %s\n' "$*" >&2; }
-ok()    { printf '[ OK ] %s\n' "$*"; }
-fail()  { printf '[FAIL] %s\n' "$*" >&2; exit 1; }
-skip()  { printf '[SKIP] %s\n' "$*"; }
-
 on_err() {
   local exit_code=$?
   printf '\n[FAIL] line %s: %s (exit %s)\n' "$1" "$2" "$exit_code" >&2

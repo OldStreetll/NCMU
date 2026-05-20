@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
-# common.sh — shared helpers for start-dev / start-prod / stop scripts.
+# common.sh — shared helpers for start-* / stop / backup / restore / recover scripts.
 # Source this file from another bash script: . "$(dirname "$0")/common.sh"
 #
 # Provides:
 #   info / warn / err / ok / fail   — colourised logging
+#   say                             — banner-style section header (plain)
+#   skip                            — neutral idempotent short-circuit marker
 #   resolve_repo_root               — sets $REPO_ROOT to the NCMU/ dir
 #   check_docker                    — verifies docker + compose are usable
 #   ensure_env_file                 — copies .env.example -> .env if missing
@@ -34,6 +36,14 @@ ok()   { printf '%s[ OK ]%s %s\n' "$C_OK"   "$C_RESET" "$*"; }
 warn() { printf '%s[WARN]%s %s\n' "$C_WARN" "$C_RESET" "$*" >&2; }
 err()  { printf '%s[ERR ]%s %s\n' "$C_ERR"  "$C_RESET" "$*" >&2; }
 fail() { err "$*"; exit 1; }
+
+# Banner-style section header (used by long-running scripts to mark phases).
+# Plain printf (no ANSI) — visual structure rather than severity.
+say()  { printf '\n===== %s =====\n' "$*"; }
+
+# Neutral skip marker (used when a desired state already holds — idempotent
+# short-circuit). Plain printf (no ANSI) — semantically neutral, not a warning.
+skip() { printf '[SKIP] %s\n' "$*"; }
 
 # ---------------------------------------------------------------------------
 # Repo root resolution
