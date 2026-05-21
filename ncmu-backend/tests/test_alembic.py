@@ -14,6 +14,9 @@ EXPECTED_TABLES = {
     "dify_app_kb_bindings",
     "dify_apps",
     "workflow_runs",
+    "app_owners",
+    "personal_kb_applications",
+    "personal_kb_application_files",
     "alembic_version",
 }
 
@@ -48,12 +51,14 @@ def test_upgrade_head_creates_all_expected_tables(db_session):
         f"预期表 {EXPECTED_TABLES} 未全部创建；实际：{sorted(rows)}"
     )
 
-    # 再断言 alembic_version 有 0006（最新 head — TASK-79-BACKEND-ARCH-FIX
-    # 加 dify_apps.api_token；0005 是 Phase 2B TASK-67b workflow_runs + dify_apps.mode）
+    # 再断言 alembic_version 有 0007（最新 head — Phase 2C TASK-PC1
+    # 加 app_owners + personal_kb_applications + personal_kb_application_files；
+    # 0006 是 TASK-79-BACKEND-ARCH-FIX dify_apps.api_token；0005 是 Phase 2B
+    # TASK-67b workflow_runs + dify_apps.mode）
     version = db_session.execute(
         text("SELECT version_num FROM alembic_version")
     ).scalar_one()
-    assert version == "0006", f"预期 alembic_version=0006，实际 {version}"
+    assert version == "0007", f"预期 alembic_version=0007，实际 {version}"
 
     # IMP-INDEP-4: 显式列级断言 — 0006 migration 的核心交付物是
     # dify_apps.api_token VARCHAR(64) NULL。版本号匹配不保证列真被加
