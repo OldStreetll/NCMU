@@ -13,6 +13,7 @@ const sampleUser: AuthUser = {
   name: "张三",
   dept_path: "/HR/招聘组",
   is_active: true,
+  is_admin: false,
 };
 
 describe("lib/auth sessionStorage helpers", () => {
@@ -42,5 +43,25 @@ describe("lib/auth sessionStorage helpers", () => {
     // jwt is still readable, but isAuthenticated requires both → false
     expect(getJwt()).toBe("abc");
     expect(isAuthenticated()).toBe(false);
+  });
+
+  // TASK-PC2-E: AuthUser.is_admin is the sessionStorage-backed mirror of
+  // the backend dev-login response. AC#3 / r3 I-INDEP2-2: getUser() must
+  // round-trip the field as a real boolean — *not* by decoding the JWT.
+  it("getUser preserves is_admin=true round-trip (sessionStorage source-of-truth)", () => {
+    const adminUser: AuthUser = { ...sampleUser, is_admin: true };
+    setAuth("jwt-token-admin", adminUser);
+    const restored = getUser();
+    expect(restored).not.toBeNull();
+    expect(restored!.is_admin).toBe(true);
+    expect(typeof restored!.is_admin).toBe("boolean");
+  });
+
+  it("getUser preserves is_admin=false (default non-admin user)", () => {
+    setAuth("jwt-token-abc", sampleUser);
+    const restored = getUser();
+    expect(restored).not.toBeNull();
+    expect(restored!.is_admin).toBe(false);
+    expect(typeof restored!.is_admin).toBe("boolean");
   });
 });

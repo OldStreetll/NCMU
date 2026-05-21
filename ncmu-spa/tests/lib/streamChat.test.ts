@@ -20,7 +20,7 @@ function makeStreamingResponse(chunks: string[], status = 200): Response {
 }
 
 beforeEach(() => {
-  setAuth("dev-jwt-fixture", { id: "u1", name: "Alice", is_active: true });
+  setAuth("dev-jwt-fixture", { id: "u1", name: "Alice", is_active: true, is_admin: false });
 });
 
 afterEach(() => {

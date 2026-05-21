@@ -68,7 +68,7 @@ function captureFetch(): { calls: CapturedCall[]; spy: ReturnType<typeof vi.fn> 
 }
 
 beforeEach(() => {
-  setAuth("dev-jwt-fixture", { id: "u1", name: "Alice", is_active: true });
+  setAuth("dev-jwt-fixture", { id: "u1", name: "Alice", is_active: true, is_admin: false });
 });
 
 afterEach(() => {
