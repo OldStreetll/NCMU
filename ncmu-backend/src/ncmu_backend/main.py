@@ -171,6 +171,13 @@ app = FastAPI(
 # on this — no warm-up request needed).
 _INCLUDED_MODULES = _discover_and_include_routers(app)
 
+# Phase 2C TASK-PC2-A: ``personal_kb.admin_routes`` lives next to
+# ``personal_kb.routes`` (which the auto-discovery already picked up).
+# The discovery scanner only honours ``routes.py``, so the admin
+# router gets a manual include here — single edit, two routers.
+from ncmu_backend.personal_kb import admin_routes as _personal_kb_admin_routes
+app.include_router(_personal_kb_admin_routes.router)
+
 
 @app.get("/healthz", tags=["meta"])
 def healthz() -> dict:

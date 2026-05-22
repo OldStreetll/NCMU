@@ -22,6 +22,12 @@ dependencies = [
     "pydantic-settings>=2.4,<3",
     "pyjwt[crypto]>=2.9,<3",
     "httpx>=0.27,<0.29",
+    # Phase 2C TASK-PC2-A (SCOPE-CHANGE approved by Boss 2026-05-21):
+    # FastAPI's Form() / File() / UploadFile multipart handling requires
+    # python-multipart at request time. Personal KB upload endpoint
+    # (POST /v1/personal-kb/applications) is the first multipart consumer
+    # in the backend. Pinned to the same lower bound FastAPI 0.115+ enforces.
+    "python-multipart>=0.0.9,<1",
 ]
 
 [project.optional-dependencies]
