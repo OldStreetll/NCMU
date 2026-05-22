@@ -15,6 +15,7 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     CheckConstraint,
     DateTime,
@@ -171,3 +172,148 @@ class WorkflowRun(Base):
         DateTime(timezone=True), nullable=True
     )
     error_msg: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+# =====================================================================
+# Phase 2C TASK-PC1 — Personal KB tables (mirror alembic 0007)
+# ---------------------------------------------------------------------
+# 3 tables landed by alembic 0007_init_personal_kb_tables:
+#   - app_owners                     private-App routing
+#   - personal_kb_applications       5-state machine (Q3-B)
+#   - personal_kb_application_files  1:N original-doc archive (FK CASCADE)
+# Field-type alignment (spec §1.5 调和 #6): app_owners.app_id and
+# personal_kb_applications.dify_app_id are String(64) to JOIN directly
+# against dify_apps.dify_app_id without a cast.
+# =====================================================================
+
+
+class AppOwner(Base):
+    """Private-App owner mapping (errata-12 §2.2).
+
+    One row per chat App that belongs to a single user (visibility =
+    'owner_only'). 'shared' / 'public' values are reserved for later
+    phases (Personal KB v2 + team KB); the CHECK constraint accepts
+    all three so the column doesn't need a schema change when those
+    land.
+    """
+
+    __tablename__ = "app_owners"
+    __table_args__ = (
+        CheckConstraint(
+            "visibility IN ('owner_only', 'shared', 'public')",
+            name="ck_app_owners_visibility",
+        ),
+    )
+
+    app_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    owner_user_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.id"),
+        nullable=False,
+    )
+    visibility: Mapped[str] = mapped_column(
+        String(20), nullable=False, server_default="owner_only"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class PersonalKbApplication(Base):
+    """Employee KB-build application (errata-12 §3.2 + Q3-B 5-state).
+
+    Status state machine (TASK-PC2-A enforces transitions in
+    application_service.py; the schema only constrains the value set):
+        pending → in_progress (admin claim)
+        pending → rejected     (admin reject before claim)
+        pending → cancelled    (employee withdraw)
+        in_progress → done     (admin dispatch)
+        in_progress → rejected (admin reject after claim)
+    Terminal states: done / rejected / cancelled.
+    """
+
+    __tablename__ = "personal_kb_applications"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'in_progress', 'done', 'rejected', 'cancelled')",
+            name="ck_personal_kb_applications_status",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        primary_key=True,
+        server_default=text("gen_random_uuid()"),
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.id"),
+        nullable=False,
+    )
+    kb_name_suggested: Mapped[str | None] = mapped_column(
+        String(200), nullable=True
+    )
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, server_default="pending"
+    )
+    fastgpt_dataset_id: Mapped[str | None] = mapped_column(
+        String(50), nullable=True
+    )
+    dify_external_kb_config_id: Mapped[uuid.UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("dify_external_kb_configs.id"),
+        nullable=True,
+    )
+    dify_app_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    admin_processed_by: Mapped[uuid.UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.id"),
+        nullable=True,
+    )
+    admin_processed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    rejection_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    files: Mapped[list["PersonalKbApplicationFile"]] = relationship(
+        back_populates="application", cascade="all, delete-orphan"
+    )
+
+
+class PersonalKbApplicationFile(Base):
+    """Original-doc archive row (one per uploaded file).
+
+    application_id FK uses ON DELETE CASCADE so a withdrawal /
+    application-level delete sweeps the archive rows in one statement
+    (the on-disk file is the StorageBackend's responsibility — landed
+    by TASK-PC2-A).
+    """
+
+    __tablename__ = "personal_kb_application_files"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        primary_key=True,
+        server_default=text("gen_random_uuid()"),
+    )
+    application_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("personal_kb_applications.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    original_filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    storage_path: Mapped[str] = mapped_column(Text, nullable=False)
+    file_size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    content_type: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    uploaded_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    application: Mapped["PersonalKbApplication"] = relationship(
+        back_populates="files"
+    )

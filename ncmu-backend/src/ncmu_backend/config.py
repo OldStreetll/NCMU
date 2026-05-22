@@ -37,6 +37,13 @@ class Settings(BaseSettings):
         env_file=None,           # docker compose injects env via env_file:
         case_sensitive=True,
         extra="ignore",
+        # Phase 2C TASK-PC2-D — three new fields below use snake_case
+        # attribute names (matching the plan §3.3 consumer API) with the
+        # UPPERCASE env var carried via validation_alias. populate_by_name
+        # keeps the kwarg constructor (`Settings(tags_routing_enabled=...)`)
+        # working alongside the alias form, so existing tests that build a
+        # Settings via uppercase field-name kwargs are unaffected.
+        populate_by_name=True,
     )
 
     # --- Database --------------------------------------------------
@@ -92,6 +99,34 @@ class Settings(BaseSettings):
 
     # --- KB-adapter (read-only reference, not used by backend) -----
     KB_ADAPTER_BASE_URL: str = "http://kb-adapter:8000"
+
+    # --- Phase 2C Personal KB (TASK-PC2-D) -------------------------
+    # tags_routing_enabled: feature flag for the shared-App tag-based
+    # routing path. **永久 false 直到钉钉接入** — only after DingTalk
+    # login backfills users.tags + tag_app_mappings does the
+    # shared-App route consult those tables (spec §1.5 调和 #4 / Q9-A
+    # startup-read semantics, no dynamic flip; rotation requires
+    # restarting ncmu-backend).
+    tags_routing_enabled: bool = Field(
+        default=False,
+        validation_alias="TAGS_ROUTING_ENABLED",
+    )
+
+    # personal_kb_storage_backend: picks which StorageBackend impl
+    # personal_kb/file_storage.py loads at startup. Phase 2C ships
+    # "local_fs" only; "minio" is a stub for the next phase.
+    personal_kb_storage_backend: str = Field(
+        default="local_fs",
+        validation_alias="PERSONAL_KB_STORAGE_BACKEND",
+    )
+
+    # personal_kb_storage_root: filesystem root LocalFsBackend writes
+    # under. One subdir per application_id. Override to ./tmp/personal-kb
+    # in docker-compose.override.yaml for dev to avoid /var/lib writes.
+    personal_kb_storage_root: str = Field(
+        default="/var/lib/ncmu/personal-kb",
+        validation_alias="PERSONAL_KB_STORAGE_ROOT",
+    )
 
     @property
     def admin_user_id_set(self) -> set[str]:

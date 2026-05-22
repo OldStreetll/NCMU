@@ -790,6 +790,12 @@ services:
       # .env has (which may use localhost / 127.0.0.1 for psql convenience).
       NCMU_DB_URL: postgresql://${NCMU_DB_USER:-ncmu_app}:${NCMU_APP_PASSWORD:-CHANGE_ME}@pg-ncmu:5432/${NCMU_DB_NAME:-ncmu}
       DEPLOY_PROFILE: ${DEPLOY_PROFILE:-dev}
+      # Phase 2C TASK-PC2-D — Personal KB feature/storage envs. The
+      # `:-` defaults track the BaseSettings defaults so a missing
+      # host-side .env still produces a usable dev container.
+      TAGS_ROUTING_ENABLED: ${TAGS_ROUTING_ENABLED:-false}
+      PERSONAL_KB_STORAGE_BACKEND: ${PERSONAL_KB_STORAGE_BACKEND:-local_fs}
+      PERSONAL_KB_STORAGE_ROOT: ${PERSONAL_KB_STORAGE_ROOT:-/var/lib/ncmu/personal-kb}
     depends_on:
       pg-ncmu:
         condition: service_healthy

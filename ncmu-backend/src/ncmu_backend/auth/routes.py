@@ -51,15 +51,22 @@ async def dev_login(
             detail={"code": 1101, "message": "dev user not found"},
         )
 
+    # TASK-PC2-E: derive is_admin from settings.admin_user_id_set (source-of-
+    # truth, per r3 I-INDEP2-1) and surface it in both the JWT claim (for
+    # SPA display sync) and the UserOut payload (frontend AuthUser.is_admin
+    # is hydrated from this, NOT by decoding the JWT — r3 I-INDEP2-2).
+    is_admin = str(user.id).lower() in settings.admin_user_id_set
     jwt_str, exp = sign_jwt(
         str(user.id),
         user.name,
         settings.NCMU_JWT_SECRET,
         ttl_hours=settings.NCMU_JWT_TTL_HOURS,
+        is_admin=is_admin,
     )
+    user_out = UserOut.model_validate(user).model_copy(update={"is_admin": is_admin})
     return DevLoginResponse(
         jwt=jwt_str,
-        user=UserOut.model_validate(user),
+        user=user_out,
         expires_at=exp,
     )
 

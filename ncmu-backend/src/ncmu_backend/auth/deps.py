@@ -67,6 +67,11 @@ async def get_current_user(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail={"code": 1106, "message": "token missing sub/name"},
         )
+    # r2 INDEP-PHASE2C-SPEC-PLAN-1 C4 + r3 I-INDEP2-1: source-of-truth for
+    # admin authorization is `settings.admin_user_id_set` (env-driven
+    # whitelist). The JWT `is_admin` claim added by TASK-PC2-E is **display
+    # state for the SPA only** — it is intentionally NOT consulted here,
+    # so a forged or tampered claim cannot escalate privileges.
     is_admin = sub.lower() in settings.admin_user_id_set
     return CurrentUser(sub=sub, name=name, is_admin=is_admin)
 

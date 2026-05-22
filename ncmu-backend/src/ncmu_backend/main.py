@@ -130,6 +130,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     client = getattr(app.state, "dify_client", None)
     if client is not None:
         await client.aclose()
+
+    # REWORK-INDEP-I2: process-singleton FastGPTReadOnlyClient owns an
+    # httpx.AsyncClient. Close it once on shutdown so the connection
+    # pool drains cleanly (the routes never call aclose per-request —
+    # that's the whole point of singletonising).
+    try:
+        from ncmu_backend.fastgpt_readonly.routes import aclose_fastgpt_client
+        await aclose_fastgpt_client()
+    except Exception as exc:
+        log.warning("FastGPT client shutdown skipped: %s", exc)
+
     log.info("ncmu-backend shutdown complete")
 
 
@@ -170,6 +181,13 @@ app = FastAPI(
 # the moment the worker accepts connections (export-openapi.sh relies
 # on this — no warm-up request needed).
 _INCLUDED_MODULES = _discover_and_include_routers(app)
+
+# Phase 2C TASK-PC2-A: ``personal_kb.admin_routes`` lives next to
+# ``personal_kb.routes`` (which the auto-discovery already picked up).
+# The discovery scanner only honours ``routes.py``, so the admin
+# router gets a manual include here — single edit, two routers.
+from ncmu_backend.personal_kb import admin_routes as _personal_kb_admin_routes
+app.include_router(_personal_kb_admin_routes.router)
 
 
 @app.get("/healthz", tags=["meta"])

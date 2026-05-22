@@ -59,6 +59,18 @@ services:
       ADMIN_API_KEY_ENABLE: "true"
       ADMIN_API_KEY: "${DIFY_ADMIN_API_KEY:?DIFY_ADMIN_API_KEY required in NCMU/.env}"
 
+  # Phase 2C TASK-PC2-D — dev-only Personal KB overrides.
+  # TAGS_ROUTING_ENABLED is pinned false here even though the base
+  # compose default is already false, to make the dev intent explicit
+  # (spec §1.5 调和 #4 — flag stays false until DingTalk lands).
+  # PERSONAL_KB_STORAGE_ROOT points at ./tmp/personal-kb on the host
+  # so dev iteration writes to the repo's tmp/ instead of
+  # /var/lib/ncmu/personal-kb inside the container's writable layer.
+  ncmu-backend:
+    environment:
+      TAGS_ROUTING_ENABLED: "false"
+      PERSONAL_KB_STORAGE_ROOT: /tmp/personal-kb
+
 volumes:
   pg-ncmu-data:
   pg-dify-data:

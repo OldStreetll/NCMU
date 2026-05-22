@@ -28,6 +28,16 @@ class UserOut(BaseModel):
     name: str
     dept_path: Optional[str] = None
     is_active: bool = True
+    is_admin: bool = Field(
+        default=False,
+        description=(
+            "Derived from settings.admin_user_id_set at dev-login time. "
+            "Surfaced to the SPA so it can sync AuthUser.is_admin without "
+            "decoding the JWT. Backend authorization is still enforced by "
+            "auth/deps.py:get_current_user (admin_user_id_set source-of-"
+            "truth, per r3 I-INDEP2-1)."
+        ),
+    )
 
 
 class DevLoginResponse(BaseModel):

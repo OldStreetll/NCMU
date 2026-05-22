@@ -1,0 +1,393 @@
+"""FastGPTReadOnlyClient unit tests — plan §4.3 AC#1-3, AC#6, AC#9.
+
+Mock-vs-real grounding (守 feedback_tdd_mock_vs_real_api 第 12 次同型):
+- list_collections mock body shape ``{"data": {"list": [{"_id", "name"}]}}``
+  matches kb-adapter ``src/kb_adapter/translator.py:40-48`` real-code grep.
+- All status / connectivity scenarios use a real httpx.MockTransport so we
+  exercise the actual request/response path (no per-method patching).
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+
+import httpx
+import pytest
+
+from ncmu_backend.fastgpt_readonly import client as client_module
+from ncmu_backend.fastgpt_readonly.client import (
+    FastGPTReadOnlyClient,
+    HEALTHCHECK_DATASET_ID,
+)
+from ncmu_backend.fastgpt_readonly.errors import (
+    FastGPTNotFound,
+    FastGPTServerError,
+    FastGPTUnauthorized,
+    FastGPTUnknownError,
+    FastGPTUnreachable,
+)
+
+
+def _mock_client(handler) -> httpx.AsyncClient:
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+
+def _build_client(handler) -> FastGPTReadOnlyClient:
+    return FastGPTReadOnlyClient(
+        base_url="http://fastgpt.example",
+        api_key="test-key",
+        http_client=_mock_client(handler),
+    )
+
+
+# --------------------------------------------------------------------- AC#1 list_collections
+async def test_list_collections_happy_path_real_field_names():
+    """Mock body uses real FastGPT v4.14.x fields (`data.list[]._id, .name`)
+    grounded against kb-adapter translator.py."""
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["method"] = request.method
+        captured["url"] = str(request.url)
+        captured["auth"] = request.headers.get("Authorization")
+        return httpx.Response(
+            200,
+            json={"data": {"list": [
+                {"_id": "coll1", "name": "员工守则.pdf", "fileId": "f1"},
+                {"_id": "coll2", "name": "福利政策.docx"},
+            ]}},
+        )
+
+    client = _build_client(handler)
+    result = await client.list_collections("ds-123")
+
+    assert captured["method"] == "GET"
+    assert "datasetId=ds-123" in captured["url"]
+    assert captured["url"].startswith("http://fastgpt.example/api/core/dataset/collection/list")
+    assert captured["auth"] == "Bearer test-key"
+
+    assert [c.collection_id for c in result] == ["coll1", "coll2"]
+    assert result[0].name == "员工守则.pdf"
+    assert result[0].file_id == "f1"
+    assert result[1].file_id is None
+
+
+async def test_list_collections_drops_entries_missing_id():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": {"list": [
+            {"_id": "ok", "name": "yes.pdf"},
+            {"name": "no-id-skipped.pdf"},  # silently dropped
+        ]}})
+
+    result = await _build_client(handler).list_collections("ds-x")
+    assert [c.collection_id for c in result] == ["ok"]
+
+
+# --------------------------------------------------------------------- AC#1 get_collection_files
+async def test_get_collection_files_unwraps_single_file_shape():
+    """FastGPT detail response can carry ``data.file`` (single) — client
+    must coerce that into a one-element list of FileMeta."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": {
+            "_id": "coll1",
+            "name": "员工守则.pdf",
+            "file": {
+                "fileId": "f-handbook",
+                "filename": "员工守则.pdf",
+                "size": 2400000,
+                "uploadTime": "2026-05-01T08:00:00Z",
+                "contentType": "application/pdf",
+            },
+        }})
+
+    files = await _build_client(handler).get_collection_files("coll1")
+    assert len(files) == 1
+    f = files[0]
+    assert f.file_id == "f-handbook"
+    assert f.original_filename == "员工守则.pdf"
+    assert f.size_bytes == 2400000
+    assert f.uploaded_at == "2026-05-01T08:00:00Z"
+    assert f.content_type == "application/pdf"
+
+
+async def test_get_collection_files_unwraps_list_shape():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": {
+            "name": "员工守则.pdf",
+            "files": [
+                {"fileId": "f1", "filename": "a.pdf", "size": 100,
+                 "createTime": "2026-05-01", "mimetype": "application/pdf"},
+                {"fileId": "f2", "filename": "b.docx", "size": 200,
+                 "createTime": "2026-05-02", "mimetype": "application/msword"},
+            ],
+        }})
+
+    files = await _build_client(handler).get_collection_files("coll1")
+    assert [f.file_id for f in files] == ["f1", "f2"]
+    assert files[1].content_type == "application/msword"
+
+
+# --------------------------------------------------------------------- AC#1 download_file (streaming)
+async def test_download_file_streams_chunks_in_order():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert "id=f-123" in str(request.url)
+        return httpx.Response(
+            200,
+            content=b"chunk-A" + b"chunk-B" + b"chunk-C",
+            headers={"Content-Type": "application/pdf"},
+        )
+
+    client = _build_client(handler)
+    chunks = b"".join([c async for c in client.download_file("f-123")])
+    assert chunks == b"chunk-Achunk-Bchunk-C"
+
+
+async def test_download_file_404_raises_FastGPTNotFound():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"error": "file removed"})
+
+    client = _build_client(handler)
+    with pytest.raises(FastGPTNotFound):
+        async for _ in client.download_file("missing"):
+            pass
+
+
+# --------------------------------------------------------------------- AC#3 error taxonomy
+async def test_404_classifies_as_FastGPTNotFound():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"error": "not found"})
+
+    with pytest.raises(FastGPTNotFound):
+        await _build_client(handler).list_collections("missing-ds")
+
+
+async def test_401_classifies_as_FastGPTUnauthorized():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, json={"error": "bad key"})
+
+    with pytest.raises(FastGPTUnauthorized):
+        await _build_client(handler).list_collections("ds")
+
+
+async def test_403_classifies_as_FastGPTUnauthorized():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, json={"error": "forbidden"})
+
+    with pytest.raises(FastGPTUnauthorized):
+        await _build_client(handler).list_collections("ds")
+
+
+async def test_fastgpt_500_with_inner_code_403_routes_to_unauthorized():
+    """v4.14.x quirk: auth errors arrive as HTTP 500 with a JSON body
+    ``{"code":403,...}``. classify_http_status must sniff the body so
+    we surface the configuration problem rather than a generic 5xx."""
+    body = {"code": 403, "statusText": "unAuthorization", "message": "x", "data": None}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, content=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
+
+    with pytest.raises(FastGPTUnauthorized):
+        await _build_client(handler).list_collections("ds")
+
+
+async def test_fastgpt_500_without_inner_code_403_routes_to_server_error():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, json={"error": "internal", "code": 500})
+
+    with pytest.raises(FastGPTServerError):
+        await _build_client(handler).list_collections("ds")
+
+
+async def test_418_classifies_as_FastGPTUnknownError():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(418, json={"detail": "i am a teapot"})
+
+    with pytest.raises(FastGPTUnknownError):
+        await _build_client(handler).list_collections("ds")
+
+
+async def test_connect_error_classifies_as_FastGPTUnreachable():
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused")
+
+    with pytest.raises(FastGPTUnreachable):
+        await _build_client(handler).list_collections("ds")
+
+
+async def test_read_timeout_classifies_as_FastGPTUnreachable():
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("upstream slow")
+
+    with pytest.raises(FastGPTUnreachable):
+        await _build_client(handler).list_collections("ds")
+
+
+# --------------------------------------------------------------------- AC#2 auth header
+async def test_authorization_header_uses_bearer_FASTGPT_API_KEY():
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["auth"] = request.headers.get("Authorization")
+        return httpx.Response(200, json={"data": {"list": []}})
+
+    client = FastGPTReadOnlyClient(
+        base_url="http://fastgpt.example",
+        api_key="real-secret",
+        http_client=_mock_client(handler),
+    )
+    await client.list_collections("ds")
+    assert captured["auth"] == "Bearer real-secret"
+
+
+# --------------------------------------------------------------------- AC#6 health_check (path A)
+async def test_health_check_500_with_auth_error_is_alive():
+    """500 + JSON {"code":403} from FastGPT means the service responded
+    (auth handler executed). Path A: any non-404 + non-connect is alive."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert f"datasetId={HEALTHCHECK_DATASET_ID}" in str(request.url)
+        return httpx.Response(500, json={"code": 403, "statusText": "unAuthorization"})
+
+    result = await _build_client(handler).health_check()
+    assert result == {"alive": True, "status_code": 500}
+
+
+async def test_health_check_200_is_alive():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": {"list": []}})
+
+    assert (await _build_client(handler).health_check())["alive"] is True
+
+
+async def test_health_check_404_is_unreachable():
+    """404 means endpoint missing (FastGPT v4.x mismatch) — degrade to
+    unreachable so the caller surfaces 503 to the user."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, text="<!DOCTYPE html>...")
+
+    with pytest.raises(FastGPTUnreachable):
+        await _build_client(handler).health_check()
+
+
+async def test_health_check_connect_error_is_unreachable():
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("nope")
+
+    with pytest.raises(FastGPTUnreachable):
+        await _build_client(handler).health_check()
+
+
+# --------------------------------------------------------------------- 取消传播 / async stream lifecycle
+async def test_asyncio_cancellation_propagates_through_list_call():
+    """Caller cancel during await → CancelledError must propagate (not
+    get swallowed by an over-broad except).守 SOP 10 跨 component 边界
+    + B-NEW-32 SSE AbortError suppression 同型纪律。"""
+
+    async def slow_handler(request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(5.0)
+        return httpx.Response(200, json={"data": {"list": []}})
+
+    client = _build_client(slow_handler)
+    task = asyncio.create_task(client.list_collections("ds"))
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+# ──────────────────── REWORK-INDEP C1: metadata TTL caching ──────────
+async def test_list_collections_caches_within_ttl():
+    """30s TTL window: two back-to-back calls fire the upstream once."""
+    call_count = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal call_count
+        call_count += 1
+        return httpx.Response(200, json={"data": {"list": [
+            {"_id": "c1", "name": "a.pdf"},
+        ]}})
+
+    client = _build_client(handler)
+    a = await client.list_collections("ds-cache")
+    b = await client.list_collections("ds-cache")
+    assert call_count == 1
+    assert [c.collection_id for c in a] == ["c1"]
+    assert [c.collection_id for c in b] == ["c1"]
+
+
+async def test_list_collections_misses_after_ttl_expiry(monkeypatch):
+    """Advance the cache's monotonic clock past 30s → next call re-fetches."""
+    call_count = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal call_count
+        call_count += 1
+        return httpx.Response(200, json={"data": {"list": [
+            {"_id": f"c{call_count}", "name": f"file-{call_count}.pdf"},
+        ]}})
+
+    fake_now = {"t": 1000.0}
+    from ncmu_backend.fastgpt_readonly import cache as cache_module
+    monkeypatch.setattr(cache_module.time, "monotonic", lambda: fake_now["t"])
+
+    client = _build_client(handler)
+
+    first = await client.list_collections("ds-ttl")
+    assert call_count == 1
+    assert [c.collection_id for c in first] == ["c1"]
+
+    fake_now["t"] += 29.0
+    second = await client.list_collections("ds-ttl")
+    assert call_count == 1  # still cached
+    assert [c.collection_id for c in second] == ["c1"]
+
+    fake_now["t"] += 2.0  # 31s elapsed → cache expired
+    third = await client.list_collections("ds-ttl")
+    assert call_count == 2
+    assert [c.collection_id for c in third] == ["c2"]
+
+
+async def test_404_invalidates_metadata_cache_entry():
+    """Cache should not retain a key whose fetcher raised 404 — next call
+    must re-attempt the upstream (so a transient 404 doesn't poison the
+    cache for the rest of the 30s window)."""
+    state = {"phase": "404"}
+    call_count = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal call_count
+        call_count += 1
+        if state["phase"] == "404":
+            return httpx.Response(404, json={"error": "missing"})
+        return httpx.Response(200, json={"data": {"list": [
+            {"_id": "c-after", "name": "after.pdf"},
+        ]}})
+
+    client = _build_client(handler)
+    with pytest.raises(FastGPTNotFound):
+        await client.list_collections("ds-flap")
+    assert call_count == 1
+    assert client_module._metadata_cache.size() == 0  # not retained
+
+    state["phase"] = "200"
+    result = await client.list_collections("ds-flap")
+    assert call_count == 2  # re-fetched, no stale 404 stored
+    assert [c.collection_id for c in result] == ["c-after"]
+
+
+async def test_download_stream_cleanup_on_caller_break():
+    """If the consumer breaks out of the async iteration the generator's
+    finally must still close the underlying stream context manager —
+    httpx leaks connections otherwise."""
+    closed = {"on_response_close": False}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"AAAA" * 1000)
+
+    client = _build_client(handler)
+    gen = client.download_file("f1")
+    first = await gen.__anext__()
+    assert first  # got at least one chunk
+    await gen.aclose()  # consumer breaks → generator finally runs → cm.__aexit__
+    closed["on_response_close"] = True  # no exception escaped
+    assert closed["on_response_close"]

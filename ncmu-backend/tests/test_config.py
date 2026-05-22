@@ -201,3 +201,90 @@ def test_prod_each_sensitive_key_raises_in_isolation(placeholder_key: str) -> No
     with pytest.raises(ValidationError) as exc_info:
         _build(**overrides)
     assert placeholder_key in str(exc_info.value)
+
+
+# =============================================================================
+# Phase 2C TASK-PC2-D — Personal KB feature/storage env coverage (AC#5)
+# -----------------------------------------------------------------------------
+# Three new envs landed alongside Personal KB (spec §1.5 调和 #4 / Q9-A):
+#   - TAGS_ROUTING_ENABLED        永久 false 直到钉钉接入
+#   - PERSONAL_KB_STORAGE_BACKEND "local_fs" only this phase
+#   - PERSONAL_KB_STORAGE_ROOT    filesystem root for LocalFsBackend
+# Three cases below cover (a) defaults when env unset, (b) successful env
+# override, (c) invalid bool literal -> pydantic ValidationError.
+# =============================================================================
+
+
+PERSONAL_KB_ENV_KEYS = (
+    "TAGS_ROUTING_ENABLED",
+    "PERSONAL_KB_STORAGE_BACKEND",
+    "PERSONAL_KB_STORAGE_ROOT",
+)
+
+
+@pytest.fixture
+def _clear_personal_kb_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Strip the three Personal KB envs so defaults / explicit kwargs win.
+
+    pydantic-settings reads os.environ at instantiation; without this
+    fixture a developer's shell-exported value would silently flip the
+    default-coverage test, hiding regressions.
+    """
+    for key in PERSONAL_KB_ENV_KEYS:
+        monkeypatch.delenv(key, raising=False)
+
+
+def test_personal_kb_envs_have_expected_defaults(
+    _clear_personal_kb_env: None,
+) -> None:
+    """AC#5 case (a): with no env set, the three fields land on the
+    BaseSettings defaults declared in config.py.
+
+    These defaults are part of the contract for downstream PC2-A
+    (file_storage.LocalFsBackend root) and PC2-C (apps service feature
+    flag) — changing them is a cross-task coordination event.
+    """
+    s = _build()
+    assert s.tags_routing_enabled is False, (
+        "tags_routing_enabled must default False until DingTalk lands "
+        "(spec §1.5 调和 #4 — never silently flip)"
+    )
+    assert s.personal_kb_storage_backend == "local_fs"
+    assert s.personal_kb_storage_root == "/var/lib/ncmu/personal-kb"
+
+
+def test_personal_kb_envs_pick_up_legal_env_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC#5 case (b): legal env values are applied at Settings()
+    instantiation (pydantic-settings reads os.environ once at startup;
+    Q9-A startup-read semantics).
+    """
+    monkeypatch.setenv("TAGS_ROUTING_ENABLED", "true")
+    monkeypatch.setenv("PERSONAL_KB_STORAGE_BACKEND", "minio")
+    monkeypatch.setenv("PERSONAL_KB_STORAGE_ROOT", "/var/lib/ncmu/pkb-test")
+
+    s = _build()
+    assert s.tags_routing_enabled is True
+    assert s.personal_kb_storage_backend == "minio"
+    assert s.personal_kb_storage_root == "/var/lib/ncmu/pkb-test"
+
+
+def test_personal_kb_envs_reject_non_bool_for_tags_routing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC#5 case (c): a string that doesn't parse as a bool raises
+    pydantic ValidationError at Settings() construction.
+
+    pydantic v2 accepts the usual truthy/falsy variants — "true",
+    "false", "yes", "no", "on", "off", "1", "0" (case-insensitive) —
+    so the case-(c) probe uses a clearly non-bool literal ("maybe")
+    which the loose-bool coercion can't interpret. The point is
+    fail-fast at startup, not the exact set of accepted spellings.
+    """
+    monkeypatch.setenv("TAGS_ROUTING_ENABLED", "maybe")
+    with pytest.raises(ValidationError) as exc_info:
+        _build()
+    assert "TAGS_ROUTING_ENABLED" in str(
+        exc_info.value
+    ) or "tags_routing_enabled" in str(exc_info.value)

@@ -104,6 +104,7 @@ beforeEach(() => {
     id: "a0000001-0000-4000-8000-000000000001",
     name: "tester",
     is_active: true,
+    is_admin: false,
   });
   chatWindowSpy.mockClear();
   // SessionList GETs /api/v1/ncmu/sessions on mount.
