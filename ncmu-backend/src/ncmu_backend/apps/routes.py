@@ -1,8 +1,11 @@
-"""GET /api/v1/ncmu/apps — list the [KB] Apps the current user can see.
+"""GET /api/v1/ncmu/apps — list the Apps the current user can chat with.
 
-Picks up the lifespan-owned httpx client via `Depends(get_dify_client)`,
-applies a 5-minute per-user cache, filters by `detect_app_type` (name
-prefix [KB] OR tag kb-qa), and projects each Dify entry to `AppOut`.
+Phase 2C paradigm shift (spec §3.3 / plan §4.4 PC2-C):
+- routes.py is a thin HTTP/projection layer; the dual-track routing
+  (shared via DifyConsoleClient ∪ owner via app_owners + dify_apps DB
+  query + dedupe) is encapsulated in apps/services.py:list_apps_for_user.
+- dify_console_client.py is the字面禁区 (C4 + C-INDEP-1 拍板): its 5-kwarg
+  signature and 5-minute lru cache stay untouched.
 """
 from __future__ import annotations
 
@@ -11,12 +14,12 @@ from functools import lru_cache
 
 import httpx
 from fastapi import APIRouter, Depends
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from ncmu_backend.apps.dify_console_client import (
-    DifyConsoleClient,
-    detect_app_type,
-)
+from ncmu_backend.apps import services
+from ncmu_backend.apps.dify_console_client import DifyConsoleClient
 from ncmu_backend.config import Settings
+from ncmu_backend.db.session import get_db
 from ncmu_backend.deps import CurrentUser, get_current_user, get_settings
 from ncmu_backend.main import get_dify_client
 from ncmu_backend.schemas.apps import AppOut
@@ -39,37 +42,34 @@ def get_dify_console_client() -> DifyConsoleClient:
 @router.get(
     "/api/v1/ncmu/apps",
     response_model=list[AppOut],
-    summary="List [KB] Apps the current user can chat with",
+    summary="List Apps the current user can chat with (shared ∪ owner)",
 )
 async def list_apps(
     user: CurrentUser = Depends(get_current_user),
     settings: Settings = Depends(get_settings),
     http: httpx.AsyncClient = Depends(get_dify_client),
     cache: DifyConsoleClient = Depends(get_dify_console_client),
+    db: AsyncSession = Depends(get_db),
 ) -> list[AppOut]:
-    raw = await cache.list_apps_for_user(
+    merged = await services.list_apps_for_user(
+        db=db,
         user_id=user.sub,
         http=http,
-        base_url=settings.DIFY_BASE_URL,
-        api_key=settings.DIFY_CONSOLE_API_KEY,
-        tenant_id=settings.DIFY_TENANT_ID,
+        cache=cache,
+        settings=settings,
     )
-    out: list[AppOut] = []
-    for entry in raw:
-        name = entry.get("name") or ""
-        if not detect_app_type(name, entry.get("tags")):
-            continue
-        out.append(
-            AppOut(
-                id=str(entry.get("id") or ""),
-                name=name,
-                type="kb_qa",
-                mode=entry.get("mode") or "chat",
-                description=entry.get("description") or None,
-            )
+    out: list[AppOut] = [
+        AppOut(
+            id=str(entry.get("id") or ""),
+            name=entry.get("name") or "",
+            type="kb_qa",
+            mode=entry.get("mode") or "chat",
+            description=entry.get("description") or None,
         )
+        for entry in merged
+    ]
     log.info(
-        "GET /api/v1/ncmu/apps user=%s upstream=%d returned=%d",
-        user.sub, len(raw), len(out),
+        "GET /api/v1/ncmu/apps user=%s merged=%d returned=%d",
+        user.sub, len(merged), len(out),
     )
     return out
