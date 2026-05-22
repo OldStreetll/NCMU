@@ -130,6 +130,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     client = getattr(app.state, "dify_client", None)
     if client is not None:
         await client.aclose()
+
+    # REWORK-INDEP-I2: process-singleton FastGPTReadOnlyClient owns an
+    # httpx.AsyncClient. Close it once on shutdown so the connection
+    # pool drains cleanly (the routes never call aclose per-request —
+    # that's the whole point of singletonising).
+    try:
+        from ncmu_backend.fastgpt_readonly.routes import aclose_fastgpt_client
+        await aclose_fastgpt_client()
+    except Exception as exc:
+        log.warning("FastGPT client shutdown skipped: %s", exc)
+
     log.info("ncmu-backend shutdown complete")
 
 
