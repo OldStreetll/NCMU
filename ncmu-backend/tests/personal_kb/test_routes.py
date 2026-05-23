@@ -54,7 +54,7 @@ async def test_create_application_returns_201_with_pending_status(
     data = {"kb_name_suggested": "HR 手册", "description": "请协助建库"}
 
     r = await app_client.post(
-        "/v1/personal-kb/applications",
+        "/api/v1/ncmu/personal-kb/applications",
         files=files,
         data=data,
         headers={"Authorization": f"Bearer {token}"},
@@ -89,7 +89,7 @@ async def test_post_rejects_more_than_10_files(
         ("files", (f"f{i}.txt", b"x", "text/plain")) for i in range(11)
     ]
     r = await app_client.post(
-        "/v1/personal-kb/applications",
+        "/api/v1/ncmu/personal-kb/applications",
         files=files,
         headers={"Authorization": f"Bearer {token}"},
     )
@@ -109,7 +109,7 @@ async def test_post_rejects_oversize_file(
     token = _jwt_for(USER_LISI_ID, "李四", jwt_secret)
     files = [("files", ("big.txt", b"A" * 100, "text/plain"))]
     r = await app_client.post(
-        "/v1/personal-kb/applications",
+        "/api/v1/ncmu/personal-kb/applications",
         files=files,
         headers={"Authorization": f"Bearer {token}"},
     )
@@ -123,7 +123,7 @@ async def test_post_rejects_unknown_extension(
     token = _jwt_for(USER_LISI_ID, "李四", jwt_secret)
     files = [("files", ("malware.exe", b"MZ", "application/octet-stream"))]
     r = await app_client.post(
-        "/v1/personal-kb/applications",
+        "/api/v1/ncmu/personal-kb/applications",
         files=files,
         headers={"Authorization": f"Bearer {token}"},
     )
@@ -155,7 +155,7 @@ async def test_post_partial_failure_cleans_prior_blobs(
         ("files", ("big.txt", b"A" * 100, "text/plain")),  # exceeds 16 B
     ]
     r = await app_client.post(
-        "/v1/personal-kb/applications",
+        "/api/v1/ncmu/personal-kb/applications",
         files=files,
         headers={"Authorization": f"Bearer {token}"},
     )
@@ -183,13 +183,13 @@ async def test_get_lists_only_own_applications(
 
     for _ in range(2):
         await app_client.post(
-            "/v1/personal-kb/applications",
+            "/api/v1/ncmu/personal-kb/applications",
             files=files,
             headers={"Authorization": f"Bearer {lisi}"},
         )
 
     r = await app_client.get(
-        "/v1/personal-kb/applications",
+        "/api/v1/ncmu/personal-kb/applications",
         headers={"Authorization": f"Bearer {lisi}"},
     )
     assert r.status_code == 200
@@ -208,19 +208,19 @@ async def test_get_filters_by_status(
     lisi = _jwt_for(USER_LISI_ID, "李四", jwt_secret)
     files = [("files", ("a.txt", b"x", "text/plain"))]
     await app_client.post(
-        "/v1/personal-kb/applications",
+        "/api/v1/ncmu/personal-kb/applications",
         files=files,
         headers={"Authorization": f"Bearer {lisi}"},
     )
     r = await app_client.get(
-        "/v1/personal-kb/applications?status=pending",
+        "/api/v1/ncmu/personal-kb/applications?status=pending",
         headers={"Authorization": f"Bearer {lisi}"},
     )
     assert r.status_code == 200
     assert all(row["status"] == "pending" for row in r.json())
 
     r2 = await app_client.get(
-        "/v1/personal-kb/applications?status=done",
+        "/api/v1/ncmu/personal-kb/applications?status=done",
         headers={"Authorization": f"Bearer {lisi}"},
     )
     assert r2.status_code == 200
@@ -235,20 +235,20 @@ async def test_delete_pending_withdraws_204(
 ) -> None:
     lisi = _jwt_for(USER_LISI_ID, "李四", jwt_secret)
     create = await app_client.post(
-        "/v1/personal-kb/applications",
+        "/api/v1/ncmu/personal-kb/applications",
         files=[("files", ("a.txt", b"x", "text/plain"))],
         headers={"Authorization": f"Bearer {lisi}"},
     )
     app_id = create.json()["id"]
     r = await app_client.delete(
-        f"/v1/personal-kb/applications/{app_id}",
+        f"/api/v1/ncmu/personal-kb/applications/{app_id}",
         headers={"Authorization": f"Bearer {lisi}"},
     )
     assert r.status_code == 204
 
     # GET list shows cancelled now.
     listed = await app_client.get(
-        "/v1/personal-kb/applications?status=cancelled",
+        "/api/v1/ncmu/personal-kb/applications?status=cancelled",
         headers={"Authorization": f"Bearer {lisi}"},
     )
     statuses = {row["status"] for row in listed.json()}
@@ -260,7 +260,7 @@ async def test_delete_others_application_returns_404(
 ) -> None:
     lisi = _jwt_for(USER_LISI_ID, "李四", jwt_secret)
     create = await app_client.post(
-        "/v1/personal-kb/applications",
+        "/api/v1/ncmu/personal-kb/applications",
         files=[("files", ("a.txt", b"x", "text/plain"))],
         headers={"Authorization": f"Bearer {lisi}"},
     )
@@ -269,7 +269,7 @@ async def test_delete_others_application_returns_404(
     # 王五 = a0...0003 attempts to delete 李四's app.
     wangwu = _jwt_for("a0000001-0000-4000-8000-000000000003", "王五", jwt_secret)
     r = await app_client.delete(
-        f"/v1/personal-kb/applications/{app_id}",
+        f"/api/v1/ncmu/personal-kb/applications/{app_id}",
         headers={"Authorization": f"Bearer {wangwu}"},
     )
     assert r.status_code == 404  # NOT 403 — anti-enumeration
@@ -281,7 +281,7 @@ async def test_delete_missing_application_returns_404(
     lisi = _jwt_for(USER_LISI_ID, "李四", jwt_secret)
     ghost = str(uuid.uuid4())
     r = await app_client.delete(
-        f"/v1/personal-kb/applications/{ghost}",
+        f"/api/v1/ncmu/personal-kb/applications/{ghost}",
         headers={"Authorization": f"Bearer {lisi}"},
     )
     assert r.status_code == 404
@@ -294,7 +294,7 @@ async def test_post_without_token_returns_401(
     app_client: httpx.AsyncClient, storage_root: Path
 ) -> None:
     r = await app_client.post(
-        "/v1/personal-kb/applications",
+        "/api/v1/ncmu/personal-kb/applications",
         files=[("files", ("a.txt", b"x", "text/plain"))],
     )
     assert r.status_code == 401

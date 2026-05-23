@@ -99,7 +99,7 @@ def test_upgrade_creates_tables(db_session):
     version = db_session.execute(
         text("SELECT version_num FROM alembic_version")
     ).scalar_one()
-    assert version == "0007", f"expected alembic_version=0007, got {version}"
+    assert version == "0008", f"expected alembic_version=0008, got {version}"
 
     # AC#6: 4 named indexes exist
     indexes = _list_indexes(db_session)
@@ -110,7 +110,7 @@ def test_upgrade_creates_tables(db_session):
 
 
 def test_downgrade_drops_tables(test_db_url):
-    """AC#1: alembic downgrade -1 完整对称回滚 (3 表 + 4 索引全删).
+    """AC#1: alembic downgrade 0008→0007→0006 对称回滚（3 表 + 4 索引全删）.
 
     Goes through a full upgrade-head/downgrade-one-step cycle on a fresh DB
     so the assertion captures both the table drop (PostgreSQL would cascade
@@ -118,7 +118,9 @@ def test_downgrade_drops_tables(test_db_url):
     in the migration body.
     """
     _run_alembic(test_db_url, "upgrade", "head")
-    _run_alembic(test_db_url, "downgrade", "-1")
+    # REWORK-PC2-FIX-C1: explicit target revision 0006 (instead of "-1") so
+    # this test stays correct as new migrations land beyond 0007 (e.g. 0008+).
+    _run_alembic(test_db_url, "downgrade", "0006")
 
     engine = create_engine(test_db_url, future=True)
     try:
@@ -139,7 +141,7 @@ def test_downgrade_drops_tables(test_db_url):
                 text("SELECT version_num FROM alembic_version")
             ).scalar_one()
             assert version == "0006", (
-                f"expected alembic_version=0006 after downgrade -1, got {version}"
+                f"expected alembic_version=0006 after downgrade to 0006, got {version}"
             )
     finally:
         engine.dispose()

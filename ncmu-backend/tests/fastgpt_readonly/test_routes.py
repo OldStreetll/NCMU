@@ -1,6 +1,6 @@
 """fastgpt_readonly/ endpoint integration tests — plan §4.3 AC#5, AC#7.
 
-Covers the two employee-facing routes (``/v1/kbs/{app_id}/files`` +
+Covers the two employee-facing routes (``/api/v1/ncmu/kbs/{app_id}/files`` +
 ``/download``), the ``user_can_access_app`` permission gate, the
 ``file_id`` reverse-lookup防越权, and the upstream-error translation
 contract (503 / 404 / 500 surfaced to the user with the spec's Chinese
@@ -147,7 +147,7 @@ async def test_list_kb_files_returns_normalised_file_meta(fastgpt_route_client, 
     })
 
     resp = await client.get(
-        "/v1/kbs/app-A/files",
+        "/api/v1/ncmu/kbs/app-A/files",
         headers={"Authorization": f"Bearer {jwt_token}"},
     )
     assert resp.status_code == 200, resp.text
@@ -185,7 +185,7 @@ async def test_download_kb_file_streams_with_correct_headers(
     })
 
     resp = await client.get(
-        "/v1/kbs/app-B/files/f-policy/download",
+        "/api/v1/ncmu/kbs/app-B/files/f-policy/download",
         headers={"Authorization": f"Bearer {jwt_token}"},
     )
     assert resp.status_code == 200
@@ -228,7 +228,7 @@ async def test_list_files_returns_403_when_user_cannot_access_app(
         )
         install_mock({})  # FastGPT should never be hit
         resp = await client.get(
-            "/v1/kbs/app-private/files",
+            "/api/v1/ncmu/kbs/app-private/files",
             headers={"Authorization": f"Bearer {lisi_token}"},
         )
     assert resp.status_code == 403
@@ -259,7 +259,7 @@ async def test_download_rejects_file_id_outside_apps_bound_datasets(
     })
 
     resp = await client.get(
-        "/v1/kbs/app-C/files/f-foreign/download",
+        "/api/v1/ncmu/kbs/app-C/files/f-foreign/download",
         headers={"Authorization": f"Bearer {jwt_token}"},
     )
     assert resp.status_code == 403
@@ -285,7 +285,7 @@ async def test_list_files_returns_empty_when_app_has_no_kb_bindings(
     install_mock({})  # FastGPT never hit
 
     resp = await client.get(
-        "/v1/kbs/app-nokb/files",
+        "/api/v1/ncmu/kbs/app-nokb/files",
         headers={"Authorization": f"Bearer {jwt_token}"},
     )
     assert resp.status_code == 200
@@ -303,7 +303,7 @@ async def test_upstream_404_translates_to_404_with_file_removed_copy(
     })
 
     resp = await client.get(
-        "/v1/kbs/app-D/files",
+        "/api/v1/ncmu/kbs/app-D/files",
         headers={"Authorization": f"Bearer {jwt_token}"},
     )
     assert resp.status_code == 404
@@ -329,7 +329,7 @@ async def test_upstream_connect_error_translates_to_503_unavailable(
     app.dependency_overrides[_get_fastgpt_client] = lambda: mock_client
     try:
         resp = await client.get(
-            "/v1/kbs/app-E/files",
+            "/api/v1/ncmu/kbs/app-E/files",
             headers={"Authorization": f"Bearer {jwt_token}"},
         )
     finally:
@@ -354,7 +354,7 @@ async def test_upstream_500_with_auth_marker_surfaces_as_500_admin_copy(
     })
 
     resp = await client.get(
-        "/v1/kbs/app-F/files",
+        "/api/v1/ncmu/kbs/app-F/files",
         headers={"Authorization": f"Bearer {jwt_token}"},
     )
     assert resp.status_code == 500
@@ -364,7 +364,7 @@ async def test_upstream_500_with_auth_marker_surfaces_as_500_admin_copy(
 # ────────────────────────────────────── unauthenticated request (AC#7) ──
 async def test_missing_jwt_returns_401(fastgpt_route_client):
     client, _, _install = fastgpt_route_client
-    resp = await client.get("/v1/kbs/anything/files")
+    resp = await client.get("/api/v1/ncmu/kbs/anything/files")
     assert resp.status_code == 401
 
 

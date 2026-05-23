@@ -43,7 +43,7 @@ from ncmu_backend.main import get_dify_client
 
 log = logging.getLogger("ncmu_backend.fastgpt_readonly.routes")
 
-router = APIRouter(prefix="/v1/kbs", tags=["fastgpt-readonly"])
+router = APIRouter(prefix="/api/v1/ncmu/kbs", tags=["fastgpt-readonly"])
 
 
 # REWORK-INDEP I2: process-singleton FastGPTReadOnlyClient so its
@@ -151,7 +151,7 @@ async def list_kb_files(
         raise translate_to_http_exception(exc) from exc
 
     log.info(
-        "GET /v1/kbs/%s/files user=%s datasets=%d files=%d",
+        "GET /api/v1/ncmu/kbs/%s/files user=%s datasets=%d files=%d",
         app_id, user.sub, len(dataset_ids), len(files),
     )
     return files

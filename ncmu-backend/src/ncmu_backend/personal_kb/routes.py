@@ -2,9 +2,9 @@
 
 Three endpoints (Phase 2C TASK-PC2-A AC#1):
 
-- POST   /v1/personal-kb/applications              (multipart upload)
-- GET    /v1/personal-kb/applications              (list own; ?status= filter)
-- DELETE /v1/personal-kb/applications/{id}         (withdraw a pending app)
+- POST   /api/v1/ncmu/personal-kb/applications              (multipart upload)
+- GET    /api/v1/ncmu/personal-kb/applications              (list own; ?status= filter)
+- DELETE /api/v1/ncmu/personal-kb/applications/{id}         (withdraw a pending app)
 
 Multipart upload streams each file through ``LocalFsBackend.save`` so a
 50 MB upload never sits in process RAM — chunks fly straight from the
@@ -63,7 +63,7 @@ from ncmu_backend.personal_kb.file_storage import (
 
 log = logging.getLogger("ncmu_backend.personal_kb.routes")
 
-router = APIRouter(prefix="/v1/personal-kb", tags=["personal-kb"])
+router = APIRouter(prefix="/api/v1/ncmu/personal-kb", tags=["personal-kb"])
 
 
 # --------------------------------------------------------------------- #
@@ -219,7 +219,7 @@ async def create_application_endpoint(
     )
 
     log.info(
-        "POST /v1/personal-kb/applications user=%s application_id=%s files=%d",
+        "POST /api/v1/ncmu/personal-kb/applications user=%s application_id=%s files=%d",
         user.sub, app_row.id, len(file_specs),
     )
     return ApplicationOut.model_validate(app_row)
@@ -280,6 +280,6 @@ async def withdraw_my_application(
             detail="仅待处理状态可撤回",
         )
     log.info(
-        "DELETE /v1/personal-kb/applications/%s user=%s",
+        "DELETE /api/v1/ncmu/personal-kb/applications/%s user=%s",
         application_id, user.sub,
     )

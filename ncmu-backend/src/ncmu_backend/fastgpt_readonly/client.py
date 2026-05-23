@@ -45,7 +45,7 @@ DEFAULT_TIMEOUT_S = 10.0
 # instance in the process — plan §4.3 AC#4 / spec §3.2 Q5-B. Keeping it
 # at module scope means a process-singleton client (see routes._get_
 # fastgpt_client_singleton) automatically gets request coalescing across
-# concurrent /v1/kbs/* requests, without each route handler re-building
+# concurrent /api/v1/ncmu/kbs/* requests, without each route handler re-building
 # its own cache. Tests that swap the upstream transport between cases
 # MUST call ``_metadata_cache.clear()`` in setup to avoid cross-test
 # hits (the conftest autouse fixture below handles this).

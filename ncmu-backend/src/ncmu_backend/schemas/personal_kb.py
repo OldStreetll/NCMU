@@ -34,7 +34,7 @@ ApplicationStatus = Literal[
 
 
 class ApplicationIn(BaseModel):
-    """Request body of POST /v1/personal-kb/applications (multipart form fields).
+    """Request body of POST /api/v1/ncmu/personal-kb/applications (multipart form fields).
 
     The actual ``files`` UploadFile list rides separately on the multipart
     request — this model captures the JSON-shaped metadata fields the form
@@ -96,7 +96,7 @@ class ApplicationDetailOut(ApplicationOut):
 
 
 class DispatchIn(BaseModel):
-    """Request body of POST /admin/personal-kb/applications/{id}/dispatch."""
+    """Request body of POST /api/v1/ncmu/admin/personal-kb/applications/{id}/dispatch."""
 
     dataset_id: str = Field(
         ..., min_length=1,
@@ -107,13 +107,13 @@ class DispatchIn(BaseModel):
         description="Dify private chat App id (admin pre-created in Dify Console)",
     )
     kb_name_final: str = Field(
-        ..., min_length=1, max_length=64,
+        ..., min_length=1, max_length=200,
         description="Final external_kb_name (cross-table unique constraint enforced by DB)",
     )
 
 
 class RejectIn(BaseModel):
-    """Request body of POST /admin/personal-kb/applications/{id}/reject."""
+    """Request body of POST /api/v1/ncmu/admin/personal-kb/applications/{id}/reject."""
 
     rejection_reason: str = Field(
         ..., min_length=1,

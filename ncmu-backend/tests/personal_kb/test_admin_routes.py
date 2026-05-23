@@ -42,7 +42,7 @@ async def _create_pending(
     client: httpx.AsyncClient, token: str, content: bytes = b"hello"
 ) -> dict:
     r = await client.post(
-        "/v1/personal-kb/applications",
+        "/api/v1/ncmu/personal-kb/applications",
         files=[("files", ("doc.txt", content, "text/plain"))],
         data={"kb_name_suggested": "HR"},
         headers={"Authorization": f"Bearer {token}"},
@@ -64,7 +64,7 @@ async def test_admin_list_returns_all_users_apps(
     await _create_pending(app_client, wangwu)
 
     r = await app_client.get(
-        "/admin/personal-kb/applications",
+        "/api/v1/ncmu/admin/personal-kb/applications",
         headers={"Authorization": f"Bearer {admin}"},
     )
     assert r.status_code == 200
@@ -79,7 +79,7 @@ async def test_admin_list_rejects_non_admin_403(
 ) -> None:
     lisi = _jwt_for(USER_LISI_ID, "李四", jwt_secret)
     r = await app_client.get(
-        "/admin/personal-kb/applications",
+        "/api/v1/ncmu/admin/personal-kb/applications",
         headers={"Authorization": f"Bearer {lisi}"},
     )
     assert r.status_code == 403
@@ -97,7 +97,7 @@ async def test_admin_detail_includes_files(
     app_id = created["id"]
 
     r = await app_client.get(
-        f"/admin/personal-kb/applications/{app_id}",
+        f"/api/v1/ncmu/admin/personal-kb/applications/{app_id}",
         headers={"Authorization": f"Bearer {admin}"},
     )
     assert r.status_code == 200
@@ -115,7 +115,7 @@ async def test_admin_detail_404_for_missing(
 ) -> None:
     admin = _jwt_for(ADMIN_USER_ID, "张三", jwt_secret)
     r = await app_client.get(
-        f"/admin/personal-kb/applications/{uuid.uuid4()}",
+        f"/api/v1/ncmu/admin/personal-kb/applications/{uuid.uuid4()}",
         headers={"Authorization": f"Bearer {admin}"},
     )
     assert r.status_code == 404
@@ -134,13 +134,13 @@ async def test_admin_download_streams_original_bytes(
 
     # Look up file_id via the admin detail endpoint.
     detail = await app_client.get(
-        f"/admin/personal-kb/applications/{created['id']}",
+        f"/api/v1/ncmu/admin/personal-kb/applications/{created['id']}",
         headers={"Authorization": f"Bearer {admin}"},
     )
     file_id = detail.json()["files"][0]["id"]
 
     r = await app_client.get(
-        f"/admin/personal-kb/applications/{created['id']}/files/{file_id}/download",
+        f"/api/v1/ncmu/admin/personal-kb/applications/{created['id']}/files/{file_id}/download",
         headers={"Authorization": f"Bearer {admin}"},
     )
     assert r.status_code == 200
@@ -161,7 +161,7 @@ async def test_admin_claim_transitions_to_in_progress(
     created = await _create_pending(app_client, lisi)
 
     r = await app_client.post(
-        f"/admin/personal-kb/applications/{created['id']}/claim",
+        f"/api/v1/ncmu/admin/personal-kb/applications/{created['id']}/claim",
         headers={"Authorization": f"Bearer {admin}"},
     )
     assert r.status_code == 200
@@ -179,12 +179,12 @@ async def test_admin_claim_409_for_already_in_progress(
     created = await _create_pending(app_client, lisi)
     # First claim succeeds.
     await app_client.post(
-        f"/admin/personal-kb/applications/{created['id']}/claim",
+        f"/api/v1/ncmu/admin/personal-kb/applications/{created['id']}/claim",
         headers={"Authorization": f"Bearer {admin}"},
     )
     # Second claim → 409.
     r = await app_client.post(
-        f"/admin/personal-kb/applications/{created['id']}/claim",
+        f"/api/v1/ncmu/admin/personal-kb/applications/{created['id']}/claim",
         headers={"Authorization": f"Bearer {admin}"},
     )
     assert r.status_code == 409
@@ -206,7 +206,7 @@ async def test_admin_dispatch_marks_done_and_writes_external_rows(
 
     # claim first.
     await app_client.post(
-        f"/admin/personal-kb/applications/{app_id}/claim",
+        f"/api/v1/ncmu/admin/personal-kb/applications/{app_id}/claim",
         headers={"Authorization": f"Bearer {admin}"},
     )
 
@@ -214,7 +214,7 @@ async def test_admin_dispatch_marks_done_and_writes_external_rows(
     name = f"hr-handbook-{uuid.uuid4().hex[:6]}"
     dify_app_id = f"app-personal-{uuid.uuid4().hex[:6]}"
     r = await app_client.post(
-        f"/admin/personal-kb/applications/{app_id}/dispatch",
+        f"/api/v1/ncmu/admin/personal-kb/applications/{app_id}/dispatch",
         json={
             "dataset_id": "ds-fastgpt-001",
             "dify_app_id": dify_app_id,
@@ -249,7 +249,7 @@ async def test_admin_dispatch_409_if_not_in_progress(
     created = await _create_pending(app_client, lisi)
     # Skip claim — dispatch attempted on pending status.
     r = await app_client.post(
-        f"/admin/personal-kb/applications/{created['id']}/dispatch",
+        f"/api/v1/ncmu/admin/personal-kb/applications/{created['id']}/dispatch",
         json={
             "dataset_id": "ds-1",
             "dify_app_id": "app-x",
@@ -271,7 +271,7 @@ async def test_admin_reject_pending_records_reason(
     lisi = _jwt_for(USER_LISI_ID, "李四", jwt_secret)
     created = await _create_pending(app_client, lisi)
     r = await app_client.post(
-        f"/admin/personal-kb/applications/{created['id']}/reject",
+        f"/api/v1/ncmu/admin/personal-kb/applications/{created['id']}/reject",
         json={"rejection_reason": "材料不全"},
         headers={"Authorization": f"Bearer {admin}"},
     )
@@ -289,13 +289,13 @@ async def test_admin_reject_409_for_terminal_state(
     created = await _create_pending(app_client, lisi)
     # 1st reject puts it into terminal 'rejected'.
     await app_client.post(
-        f"/admin/personal-kb/applications/{created['id']}/reject",
+        f"/api/v1/ncmu/admin/personal-kb/applications/{created['id']}/reject",
         json={"rejection_reason": "first"},
         headers={"Authorization": f"Bearer {admin}"},
     )
     # 2nd reject → 409.
     r = await app_client.post(
-        f"/admin/personal-kb/applications/{created['id']}/reject",
+        f"/api/v1/ncmu/admin/personal-kb/applications/{created['id']}/reject",
         json={"rejection_reason": "second"},
         headers={"Authorization": f"Bearer {admin}"},
     )
@@ -311,7 +311,65 @@ async def test_non_admin_claim_403(
     lisi = _jwt_for(USER_LISI_ID, "李四", jwt_secret)
     created = await _create_pending(app_client, lisi)
     r = await app_client.post(
-        f"/admin/personal-kb/applications/{created['id']}/claim",
+        f"/api/v1/ncmu/admin/personal-kb/applications/{created['id']}/claim",
         headers={"Authorization": f"Bearer {lisi}"},
     )
     assert r.status_code == 403
+
+
+# --------------------------------------------------------------------- #
+# REWORK-PC2-FIX-C1 — DataError catch on dispatch returns 422 instead of 500
+# --------------------------------------------------------------------- #
+async def test_admin_dispatch_kb_name_final_exceeds_db_column_returns_422(
+    app_client: httpx.AsyncClient, jwt_secret: str, storage_root: Path,
+    async_db,
+) -> None:
+    """Defense-in-depth: a future cross-stack drift where the DB column is
+    tighter than the Pydantic schema must surface as a clean 422 instead of
+    leaking psycopg StringDataRightTruncation through as 500.
+
+    Setup uses real PG (守 mock-vs-real 三支柱): on the ephemeral test DB,
+    temporarily narrow external_kb_name back to VARCHAR(64) (post-alembic-0008
+    rollback simulation). A 65-char ``kb_name_final`` then passes Pydantic
+    (max_length=200) and hits the DB column boundary, raising a real
+    DBAPIError with PG SQLSTATE 22001 that the ``except DBAPIError`` branch
+    in admin_routes.py must translate to 422 with the Chinese detail copy.
+    (asyncpg dialect does not classify StringDataRightTruncationError as
+    sqlalchemy.exc.DataError, hence the broader DBAPIError + SQLSTATE gate.)
+    """
+    from sqlalchemy import text
+
+    admin = _jwt_for(ADMIN_USER_ID, "张三", jwt_secret)
+    lisi = _jwt_for(USER_LISI_ID, "李四", jwt_secret)
+    created = await _create_pending(app_client, lisi)
+    app_id = created["id"]
+
+    # claim (real state machine + real DB write).
+    await app_client.post(
+        f"/api/v1/ncmu/admin/personal-kb/applications/{app_id}/claim",
+        headers={"Authorization": f"Bearer {admin}"},
+    )
+
+    # Narrow the ephemeral test DB column back to VARCHAR(64) — table is
+    # empty so the cast is a no-op data-wise. The ephemeral DB is torn
+    # down after this test so no other test is affected.
+    await async_db.execute(
+        text(
+            "ALTER TABLE dify_external_kb_configs "
+            "ALTER COLUMN external_kb_name TYPE VARCHAR(64)"
+        )
+    )
+    await async_db.commit()
+
+    oversized = "A" * 65  # passes Pydantic max_length=200, busts VARCHAR(64)
+    r = await app_client.post(
+        f"/api/v1/ncmu/admin/personal-kb/applications/{app_id}/dispatch",
+        json={
+            "dataset_id": "ds-fastgpt-c1",
+            "dify_app_id": f"app-personal-{uuid.uuid4().hex[:6]}",
+            "kb_name_final": oversized,
+        },
+        headers={"Authorization": f"Bearer {admin}"},
+    )
+    assert r.status_code == 422, r.text
+    assert "长度" in r.json()["detail"]

@@ -2,12 +2,12 @@
 
 Six endpoints — all gated by ``require_admin``:
 
-- GET  /admin/personal-kb/applications                            (list)
-- GET  /admin/personal-kb/applications/{id}                       (detail + files)
-- GET  /admin/personal-kb/applications/{id}/files/{file_id}/download
-- POST /admin/personal-kb/applications/{id}/claim                 (pending → in_progress)
-- POST /admin/personal-kb/applications/{id}/dispatch              (in_progress → done)
-- POST /admin/personal-kb/applications/{id}/reject
+- GET  /api/v1/ncmu/admin/personal-kb/applications                            (list)
+- GET  /api/v1/ncmu/admin/personal-kb/applications/{id}                       (detail + files)
+- GET  /api/v1/ncmu/admin/personal-kb/applications/{id}/files/{file_id}/download
+- POST /api/v1/ncmu/admin/personal-kb/applications/{id}/claim                 (pending → in_progress)
+- POST /api/v1/ncmu/admin/personal-kb/applications/{id}/dispatch              (in_progress → done)
+- POST /api/v1/ncmu/admin/personal-kb/applications/{id}/reject
 
 The ``dispatch`` endpoint is the heart of the admin path — it stitches a
 freshly-built FastGPT dataset into the Dify side by writing four rows in
@@ -24,7 +24,7 @@ from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, status as http_status
 from fastapi.responses import StreamingResponse
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ncmu_backend.deps import CurrentUser, get_db, require_admin
@@ -51,11 +51,11 @@ from ncmu_backend.schemas.personal_kb import (
 
 log = logging.getLogger("ncmu_backend.personal_kb.admin_routes")
 
-router = APIRouter(prefix="/admin/personal-kb", tags=["personal-kb-admin"])
+router = APIRouter(prefix="/api/v1/ncmu/admin/personal-kb", tags=["personal-kb-admin"])
 
 
 # --------------------------------------------------------------------- #
-# GET /admin/personal-kb/applications — list all
+# GET /api/v1/ncmu/admin/personal-kb/applications — list all
 # --------------------------------------------------------------------- #
 @router.get(
     "/applications",
@@ -77,7 +77,7 @@ async def admin_list_applications(
 
 
 # --------------------------------------------------------------------- #
-# GET /admin/personal-kb/applications/{id} — detail with files
+# GET /api/v1/ncmu/admin/personal-kb/applications/{id} — detail with files
 # --------------------------------------------------------------------- #
 @router.get(
     "/applications/{application_id}",
@@ -103,7 +103,7 @@ async def admin_get_application(
 
 
 # --------------------------------------------------------------------- #
-# GET /admin/personal-kb/applications/{id}/files/{file_id}/download
+# GET /api/v1/ncmu/admin/personal-kb/applications/{id}/files/{file_id}/download
 # --------------------------------------------------------------------- #
 @router.get(
     "/applications/{application_id}/files/{file_id}/download",
@@ -150,7 +150,7 @@ async def admin_download_file(
 
 
 # --------------------------------------------------------------------- #
-# POST /admin/personal-kb/applications/{id}/claim
+# POST /api/v1/ncmu/admin/personal-kb/applications/{id}/claim
 # --------------------------------------------------------------------- #
 @router.post(
     "/applications/{application_id}/claim",
@@ -176,14 +176,14 @@ async def admin_claim_application(
             detail="仅待处理状态可认领",
         )
     log.info(
-        "POST /admin/personal-kb/applications/%s/claim admin=%s",
+        "POST /api/v1/ncmu/admin/personal-kb/applications/%s/claim admin=%s",
         application_id, admin_user.sub,
     )
     return ApplicationOut.model_validate(app_row)
 
 
 # --------------------------------------------------------------------- #
-# POST /admin/personal-kb/applications/{id}/dispatch
+# POST /api/v1/ncmu/admin/personal-kb/applications/{id}/dispatch
 # --------------------------------------------------------------------- #
 @router.post(
     "/applications/{application_id}/dispatch",
@@ -220,15 +220,32 @@ async def admin_dispatch_application(
             status_code=http_status.HTTP_409_CONFLICT,
             detail="KB 名称冲突或外部资源不可用",
         )
+    except DBAPIError as exc:
+        # REWORK-PC2-FIX-C1: defense-in-depth for cross-stack column-length
+        # drift. Pydantic max_length=200 vs DB VARCHAR(200) (alembic 0008)
+        # is aligned today, but a future tightening of either side could
+        # surface as psycopg/asyncpg StringDataRightTruncation. asyncpg's
+        # dialect does not classify this as sqlalchemy.exc.DataError, so
+        # we catch the base DBAPIError and gate on PostgreSQL SQLSTATE
+        # 22001 (string_data_right_truncation) — stable across psycopg
+        # and asyncpg drivers.
+        sqlstate = getattr(getattr(exc, "orig", None), "sqlstate", None)
+        if sqlstate == "22001":
+            log.warning("dispatch data truncation: %s", exc)
+            raise HTTPException(
+                status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="字段长度超过数据库限制",
+            ) from exc
+        raise
     log.info(
-        "POST /admin/personal-kb/applications/%s/dispatch admin=%s dify_app=%s",
+        "POST /api/v1/ncmu/admin/personal-kb/applications/%s/dispatch admin=%s dify_app=%s",
         application_id, admin_user.sub, body.dify_app_id,
     )
     return ApplicationOut.model_validate(app_row)
 
 
 # --------------------------------------------------------------------- #
-# POST /admin/personal-kb/applications/{id}/reject
+# POST /api/v1/ncmu/admin/personal-kb/applications/{id}/reject
 # --------------------------------------------------------------------- #
 @router.post(
     "/applications/{application_id}/reject",
@@ -256,7 +273,7 @@ async def admin_reject_application(
             detail="仅待处理 / 处理中状态可拒绝",
         )
     log.info(
-        "POST /admin/personal-kb/applications/%s/reject admin=%s",
+        "POST /api/v1/ncmu/admin/personal-kb/applications/%s/reject admin=%s",
         application_id, admin_user.sub,
     )
     return ApplicationOut.model_validate(app_row)
