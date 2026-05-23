@@ -16,6 +16,8 @@ const CompletionPage = lazy(() => import("@/pages/CompletionPage"));
 const WorkflowRunPage = lazy(() => import("@/pages/WorkflowRunPage"));
 // TASK-78 (Phase 2B B3): agent-chat mode page.
 const AgentChatPage = lazy(() => import("@/pages/AgentChatPage"));
+// TASK-PC3-A (Phase 2C): employee Personal-KB application page (/my-kb).
+const MyKbPage = lazy(() => import("@/pages/MyKbPage"));
 
 const lazyFallback = (
   <div style={{ display: "flex", justifyContent: "center", padding: 48 }}>
@@ -92,6 +94,16 @@ export function AppRoutes() {
           <RequireAuth>
             <Suspense fallback={lazyFallback}>
               <AgentChatPage />
+            </Suspense>
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/my-kb"
+        element={
+          <RequireAuth>
+            <Suspense fallback={lazyFallback}>
+              <MyKbPage />
             </Suspense>
           </RequireAuth>
         }
