@@ -4,6 +4,32 @@ import type { ParameterSchema } from "@/components/workflow/DynamicInputForm";
 import { streamChat } from "@/lib/streamChat";
 import type { NcmuSseEvent } from "@/lib/sse-types";
 
+// TASK-PC3-A: Personal-KB application shape — mirrors backend
+// `schemas/personal_kb.py:ApplicationOut`. Status literal kept narrow so
+// MyKbPage's STATUS_COLOR / STATUS_LABEL maps are exhaustive against the
+// type system (TS 5.5 catches missing branches the moment backend adds a
+// 6th value — pre-existing `feedback_status_enum_cross_stack_sync` SOP).
+export type PersonalKbApplicationStatus =
+  | "pending"
+  | "in_progress"
+  | "done"
+  | "rejected"
+  | "cancelled";
+
+export interface PersonalKbApplication {
+  id: string;
+  user_id: string;
+  kb_name_suggested: string | null;
+  description: string | null;
+  status: PersonalKbApplicationStatus;
+  fastgpt_dataset_id: string | null;
+  dify_app_id: string | null;
+  admin_processed_by: string | null;
+  admin_processed_at: string | null;
+  rejection_reason: string | null;
+  created_at: string;
+}
+
 // E-1 修订：BASE = /api/v1/ncmu — Phase 0 已用 /api/* 反代 Dify，必须避开。
 const BASE = "/api/v1/ncmu";
 
@@ -192,4 +218,103 @@ export async function runWorkflow(
     // can still render a generic error via runWorkflow's rejection if
     // streamChat throws; per-frame `error` events go to the orchestrator.
   }
+}
+
+// --- TASK-PC3-A — Personal-KB endpoints --------------------------------
+//
+// Backend prefix is `/api/v1/ncmu/personal-kb/applications` (PC2-FIX 2026-05-23,
+// reuses the existing ncmu BASE so nginx ^~ /api/v1/ncmu/ + vite proxy stay
+// unchanged — see prior wire-shape T2 INTENT-CHECK). All three helpers go
+// through `api()` for GET / and inline fetch for POST multipart + DELETE 204
+// (the JSON-only api() helper would set Content-Type: application/json on
+// the multipart body and choke on the empty 204 response respectively).
+
+export interface SubmitApplicationInput {
+  kb_name_suggested: string;
+  description?: string;
+  files: File[];
+}
+
+// GET /api/v1/ncmu/personal-kb/applications — list current user's apps.
+export async function listMyApplications(): Promise<PersonalKbApplication[]> {
+  return api<PersonalKbApplication[]>("/personal-kb/applications");
+}
+
+// POST /api/v1/ncmu/personal-kb/applications — multipart submit. Browser
+// auto-sets `Content-Type: multipart/form-data; boundary=...` only when
+// we DO NOT pre-set the header — hence the inline fetch (api() would
+// force application/json and clobber the multipart boundary).
+export async function submitApplication(
+  input: SubmitApplicationInput,
+): Promise<PersonalKbApplication> {
+  const form = new FormData();
+  form.append("kb_name_suggested", input.kb_name_suggested);
+  if (input.description !== undefined && input.description !== "") {
+    form.append("description", input.description);
+  }
+  for (const f of input.files) {
+    form.append("files", f, f.name);
+  }
+  const jwt = getJwt();
+  if (!jwt) throw new ApiError(401, undefined, "no jwt");
+  const resp = await fetch(`${BASE}/personal-kb/applications`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${jwt}` },
+    body: form,
+  });
+  if (!resp.ok) {
+    let body: { code?: number; message?: string; detail?: unknown } = {};
+    try {
+      body = await resp.json();
+    } catch {
+      // non-json response — fall through with statusText
+    }
+    const detail = (body as { detail?: unknown }).detail;
+    let message: string = resp.statusText;
+    let code: number | undefined = body.code;
+    if (typeof detail === "string") {
+      message = detail;
+    } else if (detail && typeof detail === "object") {
+      const d = detail as { code?: number; message?: string };
+      code = d.code ?? code;
+      message = d.message ?? message;
+    } else if (body.message) {
+      message = body.message;
+    }
+    throw new ApiError(resp.status, code, message);
+  }
+  return resp.json() as Promise<PersonalKbApplication>;
+}
+
+// DELETE /api/v1/ncmu/personal-kb/applications/{id} — withdraw a pending app.
+// Returns 204 No Content on success (api() would explode on resp.json()).
+export async function cancelApplication(applicationId: string): Promise<void> {
+  const jwt = getJwt();
+  if (!jwt) throw new ApiError(401, undefined, "no jwt");
+  const resp = await fetch(
+    `${BASE}/personal-kb/applications/${encodeURIComponent(applicationId)}`,
+    { method: "DELETE", headers: { Authorization: `Bearer ${jwt}` } },
+  );
+  if (!resp.ok) {
+    let body: { code?: number; message?: string; detail?: unknown } = {};
+    try {
+      body = await resp.json();
+    } catch {
+      // empty body / non-json — statusText falls through
+    }
+    const detail = (body as { detail?: unknown }).detail;
+    let message: string = resp.statusText;
+    let code: number | undefined = body.code;
+    if (typeof detail === "string") {
+      message = detail;
+    } else if (detail && typeof detail === "object") {
+      const d = detail as { code?: number; message?: string };
+      code = d.code ?? code;
+      message = d.message ?? message;
+    } else if (body.message) {
+      message = body.message;
+    }
+    throw new ApiError(resp.status, code, message);
+  }
+  // 204 — no body to parse.
 }
