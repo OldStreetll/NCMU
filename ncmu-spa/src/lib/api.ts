@@ -193,3 +193,42 @@ export async function runWorkflow(
     // streamChat throws; per-frame `error` events go to the orchestrator.
   }
 }
+
+// --- TASK-PC3-C (Phase 2C) — KB content panel (errata-13 §2.5) ------------
+//
+// Two helpers used by ``AppKbContentPanel`` to list / download the files
+// behind an App's bound KBs.
+//
+// Backend wire shape (byte-exact with ncmu-backend FastGPTReadOnlyClient
+// `FileMeta` —守 feedback_tdd_mock_vs_real_api SOP 11):
+//   {
+//     file_id: str,
+//     original_filename: str,
+//     size_bytes: int,
+//     uploaded_at: str,
+//     content_type: str,
+//   }
+//
+// Endpoints (PC2-FIX prefix decision — `/api/v1/ncmu/kbs/...` so nginx
+// `^~ /api/v1/ncmu/` reaches ncmu-backend; the prior `/v1/kbs/...` shape
+// would have hit the Dify upstream — see docker/nginx/dev.conf.template).
+
+export interface KbFile {
+  file_id: string;
+  original_filename: string;
+  size_bytes: number;
+  uploaded_at: string;
+  content_type: string;
+}
+
+// GET /api/v1/ncmu/kbs/{appId}/files → list[KbFile]
+export function listKbFiles(appId: string): Promise<KbFile[]> {
+  return api<KbFile[]>(`/kbs/${encodeURIComponent(appId)}/files`);
+}
+
+// Resolve the download URL for a single KB file. Callers pass this to
+// ``window.open`` so the browser handles the stream natively (plan §4.8
+// AC#3 — no front-end blob buffering; backend sets Content-Disposition).
+export function getKbFileDownloadUrl(appId: string, fileId: string): string {
+  return `${BASE}/kbs/${encodeURIComponent(appId)}/files/${encodeURIComponent(fileId)}/download`;
+}

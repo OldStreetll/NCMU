@@ -45,6 +45,7 @@
 import { useCallback, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { ChatWindow } from "@/components/ChatWindow";
+import AppKbContentPanel from "@/components/AppKbContentPanel";
 import {
   SessionList,
   type Session,
@@ -119,13 +120,26 @@ export default function ChatPage() {
           onChange={handleSessionPick}
         />
       </aside>
-      <main style={{ flex: 1, minWidth: 0 }}>
-        <ChatWindow
-          appId={DEFAULT_APP_ID}
-          sessionId={activeSession?.id ?? null}
-          conversationId={activeSession?.dify_conversation_id ?? null}
-          onSessionCreated={handleSessionCreated}
-        />
+      <main
+        style={{
+          flex: 1,
+          minWidth: 0,
+          display: "flex",
+          flexDirection: "column",
+        }}
+      >
+        {/* TASK-PC3-C: KB content panel sits above ChatWindow as a layout
+            element — plan §4.8 禁区字面 "不嵌入 ChatWindow". The panel is
+            collapsed by default and lazy-loads on expand. */}
+        <AppKbContentPanel appId={DEFAULT_APP_ID} />
+        <div style={{ flex: 1, minHeight: 0 }}>
+          <ChatWindow
+            appId={DEFAULT_APP_ID}
+            sessionId={activeSession?.id ?? null}
+            conversationId={activeSession?.dify_conversation_id ?? null}
+            onSessionCreated={handleSessionCreated}
+          />
+        </div>
       </main>
     </div>
   );
