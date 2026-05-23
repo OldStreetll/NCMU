@@ -192,3 +192,38 @@ describe("<ChatPage> two-id wiring (TASK-FIX-50 / B-NEW-50)", () => {
     expect(p.conversationId).toBeNull();
   });
 });
+
+// TASK-PC3-C (Phase 2C) — AppKbContentPanel mounts above ChatWindow as a
+// layout sibling (plan §4.8 AC#1 — "挂载即渲染 / 不嵌入 ChatWindow"). Plan
+// §4.8 AC#7 字面 — ChatPage tests assert the testid `app-kb-content-panel`
+// is present on /chat mount.
+describe("<ChatPage> + AppKbContentPanel (TASK-PC3-C)", () => {
+  it("AC#7 — AppKbContentPanel真渲染 on /chat mount (testid app-kb-content-panel present, no /kbs fetch fired because the panel is collapsed by default)", async () => {
+    // Track every fetch URL so we can both wait for paint AND assert that
+    // the KB-files endpoint was NOT called (panel default-closed = lazy).
+    // Typing the spy with `typeof fetch` makes mock.calls[i][0] resolve to
+    // RequestInfo | URL instead of the default empty-tuple inference (which
+    // would let `c[0]` be `undefined` and trip TS2493 + TS2352).
+    const fetchSpy = vi.fn<typeof fetch>(() =>
+      Promise.resolve(
+        jsonResponse({ items: sampleSessions, next_cursor: null }),
+      ),
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+
+    renderAt("/chat");
+
+    // The panel mounts under DEFAULT_APP_ID = "default" (ChatPage.tsx:56).
+    // testid is rendered eagerly — collapsed-by-default does NOT gate the
+    // header DOM, only the lazy fetch.
+    expect(screen.getByTestId("app-kb-content-panel")).toBeInTheDocument();
+
+    // Wait for SessionList's mount-time GET /sessions to settle so we know
+    // the test exercised steady state, then assert no /kbs URL ever fired.
+    await waitFor(() => expect(fetchSpy).toHaveBeenCalled());
+    const calledUrls = fetchSpy.mock.calls.map((c) => c[0]);
+    expect(
+      calledUrls.some((u) => typeof u === "string" && u.includes("/kbs/")),
+    ).toBe(false);
+  });
+});
