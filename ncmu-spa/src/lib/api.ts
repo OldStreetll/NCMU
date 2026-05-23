@@ -40,11 +40,20 @@ export async function api<T = unknown>(
     } catch {
       // non-json response (eg. nginx 502 HTML); fall through with statusText
     }
-    // dev-login + dev/users return 404 with detail={code,message}; FastAPI
-    // wraps it as `detail: {...}` not flat — handle both shapes.
-    const detail = (body as unknown as { detail?: { code?: number; message?: string } }).detail;
-    const code = detail?.code ?? body.code;
-    const message = detail?.message ?? body.message ?? resp.statusText;
+    // dev-login + dev/users return 404 with detail={code,message}; FastAPI's
+    // default HTTPException returns `detail: "<string>"`. TASK-PC3-B widens
+    // the handler so personal_kb admin endpoints (409 "该申请已被其他管理员认领"
+    // etc.) surface their detail string as err.message instead of dropping
+    // it back to "Conflict" statusText.
+    const rawDetail = (body as unknown as {
+      detail?: { code?: number; message?: string } | string;
+    }).detail;
+    const detailObj =
+      typeof rawDetail === "object" && rawDetail !== null ? rawDetail : undefined;
+    const detailStr = typeof rawDetail === "string" ? rawDetail : undefined;
+    const code = detailObj?.code ?? body.code;
+    const message =
+      detailObj?.message ?? detailStr ?? body.message ?? resp.statusText;
     throw new ApiError(resp.status, code, message);
   }
   return resp.json() as Promise<T>;
@@ -192,4 +201,111 @@ export async function runWorkflow(
     // can still render a generic error via runWorkflow's rejection if
     // streamChat throws; per-frame `error` events go to the orchestrator.
   }
+}
+
+// --- TASK-PC3-B — admin /admin/personal-kb endpoints ------------------------
+//
+// Wire shape grounded against ncmu-backend/src/ncmu_backend/schemas/personal_kb.py
+// + personal_kb/admin_routes.py (Boss-confirmed 2026-05-23 after PC2-FIX wires
+// the router under the `/api/v1/ncmu/admin/personal-kb` prefix that nginx
+// `^~ /api/v1/ncmu/` actually routes to ncmu-backend). The api() helper above
+// prepends BASE="/api/v1/ncmu" so callers pass `/admin/personal-kb/...` and
+// land at the full backend route.
+//
+// Status enum is the cross-stack mirror of backend's `ApplicationStatus`
+// Literal — keep both sides in lock-step per `feedback_status_enum_cross_stack_sync`.
+
+export type ApplicationStatus =
+  | "pending"
+  | "in_progress"
+  | "done"
+  | "rejected"
+  | "cancelled";
+
+export interface FileMeta {
+  id: string;
+  original_filename: string;
+  file_size_bytes: number;
+  content_type: string | null;
+  sha256: string | null;
+  uploaded_at: string;
+}
+
+export interface ApplicationOut {
+  id: string;
+  user_id: string;
+  kb_name_suggested: string | null;
+  description: string | null;
+  status: ApplicationStatus;
+  fastgpt_dataset_id: string | null;
+  dify_app_id: string | null;
+  admin_processed_by: string | null;
+  admin_processed_at: string | null;
+  rejection_reason: string | null;
+  created_at: string;
+}
+
+export interface ApplicationDetailOut extends ApplicationOut {
+  files: FileMeta[];
+}
+
+export interface DispatchIn {
+  dataset_id: string;
+  dify_app_id: string;
+  kb_name_final: string;
+}
+
+export interface RejectIn {
+  rejection_reason: string;
+}
+
+// GET /admin/personal-kb/applications — admin pulls the FULL list (no `?status=`
+// filter param) per r3 INDEP-2 I-INDEP2-3 path-b: Segmented filtering happens
+// client-side, and PendingBadge counts off the same list.
+export function listPendingApplications(): Promise<ApplicationOut[]> {
+  return api<ApplicationOut[]>("/admin/personal-kb/applications");
+}
+
+// GET /admin/personal-kb/applications/{id} — detail + eagerly-loaded files.
+export function getApplicationDetail(
+  applicationId: string,
+): Promise<ApplicationDetailOut> {
+  return api<ApplicationDetailOut>(
+    `/admin/personal-kb/applications/${applicationId}`,
+  );
+}
+
+// POST /admin/personal-kb/applications/{id}/claim — pending → in_progress.
+// 409 `仅待处理状态可认领` if someone else already claimed.
+export function claimApplication(
+  applicationId: string,
+): Promise<ApplicationOut> {
+  return api<ApplicationOut>(
+    `/admin/personal-kb/applications/${applicationId}/claim`,
+    { method: "POST" },
+  );
+}
+
+// POST /admin/personal-kb/applications/{id}/dispatch — in_progress → done.
+// 409 `请先认领申请` if status != in_progress; 409 `KB 名称冲突或外部资源不可用`
+// on IntegrityError; 422 from backend SQLSTATE 22001 gate if kb_name_final >200.
+export function dispatchApplication(
+  applicationId: string,
+  body: DispatchIn,
+): Promise<ApplicationOut> {
+  return api<ApplicationOut>(
+    `/admin/personal-kb/applications/${applicationId}/dispatch`,
+    { method: "POST", body: JSON.stringify(body) },
+  );
+}
+
+// POST /admin/personal-kb/applications/{id}/reject — pending|in_progress → rejected.
+export function rejectApplication(
+  applicationId: string,
+  body: RejectIn,
+): Promise<ApplicationOut> {
+  return api<ApplicationOut>(
+    `/admin/personal-kb/applications/${applicationId}/reject`,
+    { method: "POST", body: JSON.stringify(body) },
+  );
 }

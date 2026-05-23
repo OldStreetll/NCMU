@@ -16,6 +16,11 @@ const CompletionPage = lazy(() => import("@/pages/CompletionPage"));
 const WorkflowRunPage = lazy(() => import("@/pages/WorkflowRunPage"));
 // TASK-78 (Phase 2B B3): agent-chat mode page.
 const AgentChatPage = lazy(() => import("@/pages/AgentChatPage"));
+// TASK-PC3-B (Phase 2C): admin personal-KB list + double-column detail.
+const AdminPersonalKbPage = lazy(() => import("@/pages/AdminPersonalKbPage"));
+const AdminApplicationDetailPage = lazy(
+  () => import("@/pages/AdminApplicationDetailPage"),
+);
 
 const lazyFallback = (
   <div style={{ display: "flex", justifyContent: "center", padding: 48 }}>
@@ -92,6 +97,30 @@ export function AppRoutes() {
           <RequireAuth>
             <Suspense fallback={lazyFallback}>
               <AgentChatPage />
+            </Suspense>
+          </RequireAuth>
+        }
+      />
+      {/* TASK-PC3-B: admin guard via inline RequireAuth wrap (matches the
+          6 existing routes above). The nested-Route layout pattern would need
+          RequireAuth to render <Outlet/> instead of children — leaving the
+          PC2-E shared component alone keeps the change surface tight. */}
+      <Route
+        path="/admin/personal-kb"
+        element={
+          <RequireAuth requireAdmin>
+            <Suspense fallback={lazyFallback}>
+              <AdminPersonalKbPage />
+            </Suspense>
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/admin/personal-kb/applications/:id"
+        element={
+          <RequireAuth requireAdmin>
+            <Suspense fallback={lazyFallback}>
+              <AdminApplicationDetailPage />
             </Suspense>
           </RequireAuth>
         }
