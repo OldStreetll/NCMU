@@ -1,0 +1,7 @@
+# 运行时生成的 binary fixture（dd / python 现造，0 外部依赖）。
+# 见 README.md "运行时生成" 段。
+*.pdf
+*.exe
+*.bin
+*.tmp
+count_overflow_*.txt

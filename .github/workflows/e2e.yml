@@ -1,0 +1,124 @@
+# .github/workflows/e2e.yml — NCMU 真容器 E2E（每 PR 跑）
+#
+# 仓内此前无 .github/ 目录。本文件首发为 TASK-PC4 Phase 2C Batch C4
+# 提供 CI 入口（job e2e_personal_kb），并占位 Phase 2B 5 mode E2E
+# （job e2e_workflow_modes / 默认 disabled，待 Boss 决议 workspace
+# secrets/runner topology 后开启）。
+#
+# 设计约束（任务模板 AC#8 + 守 memory）：
+#   - 时长预算 10 min（黄金 ≤5 / 异常 ≤3 / 余量 2）
+#   - 每 PR 跑（pull_request trigger）+ push to main 兜底
+#   - dev pane 不启停 stack — CI 端由 runner 用 docker compose 起完整 stack
+#     （CI 是 cross-cut 设施层，与 dev pane CLAUDE.md §8.1 "不启停 stack"
+#     约束不冲突 — Boss 在线启停 vs CI runner 自启停是两个层面）
+#
+# 依赖 GitHub repo secrets（Boss 在 Settings → Secrets and variables → Actions
+# 配置后此 workflow 才能跑通）：
+#   - DIFY_INIT_PASSWORD       Dify Console 首次 setup 用密码（dev 预制账号）
+#   - FASTGPT_DEFAULT_ROOT_PSW FastGPT root 密码
+#   - 其他 .env CHANGE_ME 项的 dev 值通过 .env.ci.example 或 secret 注入
+#
+# 若 secrets 未配置 → workflow 在 Step "Bootstrap .env" fail-fast，
+# 提示需要的 secret 列表（不暴露 secret 值）。
+
+name: e2e
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:        # 允许手动触发（debug 用）
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+
+  # ── Phase 2C Batch C4 真容器 E2E（TASK-PC4） ──────────────────────────
+  e2e_personal_kb:
+    name: E2E Personal KB (Phase 2C / TASK-PC4)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25      # 10 min e2e + 8-12 min stack boot + buffer
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Bootstrap .env (from CI secrets / fail-fast if missing)
+        env:
+          DIFY_INIT_PASSWORD: ${{ secrets.DIFY_INIT_PASSWORD }}
+          FASTGPT_DEFAULT_ROOT_PSW: ${{ secrets.FASTGPT_DEFAULT_ROOT_PSW }}
+        run: |
+          set -euo pipefail
+          missing=()
+          [ -n "${DIFY_INIT_PASSWORD:-}" ]       || missing+=(DIFY_INIT_PASSWORD)
+          [ -n "${FASTGPT_DEFAULT_ROOT_PSW:-}" ] || missing+=(FASTGPT_DEFAULT_ROOT_PSW)
+          if [ ${#missing[@]} -gt 0 ]; then
+            printf '[FAIL] missing CI secrets: %s\n' "${missing[*]}" >&2
+            printf 'Configure them at Settings → Secrets and variables → Actions.\n' >&2
+            exit 1
+          fi
+          cp .env.example .env
+          # dev-login + admin 必须开启（脚本 preflight 强 enforce）
+          sed -i 's/^NCMU_ENABLE_DEV_LOGIN=.*/NCMU_ENABLE_DEV_LOGIN=true/' .env || \
+            printf 'NCMU_ENABLE_DEV_LOGIN=true\n' >> .env
+          # 把 secret 值填入 .env 的 CHANGE_ME（避免 grep -l CHANGE_ME 时漏算）
+          sed -i "s|^DIFY_INIT_PASSWORD=.*|DIFY_INIT_PASSWORD=${DIFY_INIT_PASSWORD}|" .env
+          sed -i "s|^FASTGPT_DEFAULT_ROOT_PSW=.*|FASTGPT_DEFAULT_ROOT_PSW=${FASTGPT_DEFAULT_ROOT_PSW}|" .env
+          # 其余 CHANGE_ME（DB 密码 / JWT secret 等）保留 — start-dev.sh 会用
+          # ncmu_init.py 的 dev-bootstrap 路径自动生成。
+
+      - name: Start full stack (scripts/start-dev.sh)
+        timeout-minutes: 12
+        run: |
+          set -euo pipefail
+          bash scripts/start-dev.sh --no-interactive || {
+            printf '\n--- compose ps on failure ---\n' >&2
+            docker compose ps >&2 || true
+            printf '\n--- recent logs ---\n' >&2
+            docker compose logs --tail=80 >&2 || true
+            exit 1
+          }
+
+      - name: Wait for stack healthy (60s grace after compose up --wait)
+        run: |
+          set -euo pipefail
+          # start-dev.sh 内已 `compose up --wait`；这里只做最终核对，
+          # 避免极少数 race（如 token-sync 触发的 ncmu-backend restart）。
+          sleep 15
+          docker compose ps --format 'table {{.Service}}\t{{.Status}}'
+
+      - name: Run TASK-PC4 E2E (make e2e-personal-kb)
+        timeout-minutes: 10
+        run: make e2e-personal-kb
+
+      - name: Upload result log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pc4-e2e-logs
+          path: |
+            /tmp/pc4-e2e-*.log
+            /tmp/pc4-step-*
+          retention-days: 7
+
+      - name: Tear down stack (always)
+        if: always()
+        run: docker compose down -v --remove-orphans || true
+
+  # ── Phase 2B 5 mode E2E（TASK-79 / 占位 / 默认 disabled） ────────────
+  e2e_workflow_modes:
+    name: E2E Workflow Modes (Phase 2B / TASK-79)
+    if: false               # Boss 决议后改 true
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Placeholder
+        run: |
+          printf 'TASK-79 5 mode E2E job 占位 — workflow_modes_fixtures.json\n'
+          printf '需 Boss 手填 5 mode app_id；CI 端 secret 注入策略待决议。\n'
