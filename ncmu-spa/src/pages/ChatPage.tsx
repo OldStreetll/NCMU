@@ -52,9 +52,14 @@ import {
   type SessionListHandle,
 } from "@/components/SessionList";
 
-// TASK-PLAN-FIX-1 / Phase 1 default: a single Dify [KB] App. Multi-app
-// switching ships in a later phase; until then the appId is fixed.
-const DEFAULT_APP_ID = "default";
+// Phase 1 [KB]员工手册 chat app — real dify_apps.id UUID. Earlier value
+// "default" placeholder worked because the chat endpoint ignores app_id
+// (uses DIFY_APP_DEFAULT_TOKEN env), but the PC3-C KB folding panel
+// route `/api/v1/ncmu/kbs/{app_id}/files` validates app_id literal via
+// user_can_access_app → "default" → 403. Phase 2C apps paradigm shift
+// (commit c53523d) codified the all-UUID convention; this constant
+// aligns SPA with it. Multi-app switching ships in a later phase.
+const DEFAULT_APP_ID = "87d8d015-7515-4c85-b04c-52905d565549";
 
 // Slim active-session shape — `dify_conversation_id` may be null in the
 // cold-bookmark case where only the URL UUID is known up-front.
