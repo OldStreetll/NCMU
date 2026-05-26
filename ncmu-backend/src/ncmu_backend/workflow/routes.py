@@ -28,15 +28,22 @@ import asyncio
 import json
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+import httpx
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ncmu_backend.apps import services
+from ncmu_backend.apps.dify_console_client import DifyConsoleClient
+from ncmu_backend.apps.routes import get_dify_console_client
 from ncmu_backend.auth.deps import CurrentUser, get_current_user
 from ncmu_backend.chat.sse import encode_sse_frame
+from ncmu_backend.config import Settings
 from ncmu_backend.db.models import WorkflowRun
 from ncmu_backend.db.session import SessionLocal, get_db
+from ncmu_backend.deps import get_settings
+from ncmu_backend.main import get_dify_client
 from ncmu_backend.schemas.workflow import (
     WorkflowRunDetail,
     WorkflowRunRequest,
@@ -63,6 +70,9 @@ async def run_workflow(
     app_id: str,
     body: WorkflowRunRequest,
     user: CurrentUser = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+    http: httpx.AsyncClient = Depends(get_dify_client),
+    cache: DifyConsoleClient = Depends(get_dify_console_client),
     db: AsyncSession = Depends(get_db),
     dispatcher: ModeDispatcher = Depends(get_dispatcher),
 ):
@@ -70,7 +80,26 @@ async def run_workflow(
 
     B2 注册前若 mode='advanced-chat' 等会抛 KeyError → 下方 except 捕获 →
     SSE error event code=503。
+
+    TASK-BUG-5 — gated by ``services.user_can_access_app`` (owner OR
+    shared via DifyConsoleClient cache) so a logged-in user cannot trigger
+    workflow runs against apps they aren't entitled to. Same shape as
+    apps/routes.py:78 and fastgpt_readonly/routes.py:111; 403 + code 1002.
     """
+    allowed = await services.user_can_access_app(
+        db=db,
+        user_id=user.sub,
+        app_id=app_id,
+        http=http,
+        cache=cache,
+        settings=settings,
+    )
+    if not allowed:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"code": 1002, "message": "App not accessible by current user"},
+        )
+
     run_id = uuid.uuid4()
     user_id = uuid.UUID(user.sub)
 
