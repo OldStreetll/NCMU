@@ -125,7 +125,16 @@ class AgentChatOrchestrator(BaseOrchestrator):
                                 ),
                             ),
                         )
-                elif event_name == "message":
+                elif event_name in ("message", "agent_message"):
+                    # BUG-3: Dify v1.13.3 agent-chat mode emits ``agent_message``
+                    # (one char per chunk in ``answer``); chat/completion modes
+                    # emit ``message``. Wire shape is identical — ``answer``
+                    # carries chunk text — so they share the accumulator branch.
+                    # Verified 2026-05-26 via live SSE capture against agent app
+                    # 1f05dbfc-1d82-4591-bbae-40c25eaa3d8b (39 agent_message + 0
+                    # message frames). Without this, agent-chat mode runs always
+                    # land in message_end with accumulated_text == "" and SPA
+                    # main bubble stays blank.
                     accumulated_text += raw.get("answer", "")
                     continue
                 elif event_name == "error":

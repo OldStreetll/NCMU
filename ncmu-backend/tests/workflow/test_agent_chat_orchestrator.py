@@ -671,3 +671,79 @@ async def test_b_new_43_batch_n3_concurrent_completes_with_per_call_mitigation(
         f"B-NEW-43: expected exactly 3 mitigation sleeps (1 per N=3 "
         f"batch member); got {sleep_calls}"
     )
+
+
+# ===================================================================== #
+# BUG-3 — Dify v1.13.3 agent-chat mode emits ``agent_message`` (not
+# ``message``); the accumulator branch must cover both event names so
+# the SPA main bubble receives the final answer string.
+#
+# Live wire-shape capture 2026-05-26 against agent app
+# 1f05dbfc-1d82-4591-bbae-40c25eaa3d8b (one ``What time is it now?`` run):
+#   Counter({'agent_message': 39, 'agent_thought': 1})   # 0 'message' frames
+# Each agent_message frame carries one (or two) chars in ``answer``.
+# ===================================================================== #
+
+
+async def test_bug3_agent_message_accumulates_into_outputs_answer():
+    """BUG-3: pure agent-chat mode stream (3 agent_message chunks + 1
+    message_end) → outputs.answer = concatenated chunks (non-empty).
+
+    Pre-fix (event_name == "message") this would yield outputs.answer = ""
+    because no ``message`` frame ever arrives in agent-chat mode.
+    """
+    from ncmu_backend.workflow.agent_chat import AgentChatOrchestrator
+
+    frames = [
+        {"event": "agent_message", "answer": "Hi "},
+        {"event": "agent_message", "answer": "th"},
+        {"event": "agent_message", "answer": "ere"},
+        {"event": "message_end"},
+    ]
+    stub = _StubDifyClient(frames)
+    orch = AgentChatOrchestrator()
+    run_id, app_id, user_id, inputs = _make_run_args()
+    events = [ev async for ev in orch.run(stub, run_id, app_id, user_id, inputs)]
+
+    # Exactly 1 terminal envelope; 3 agent_message frames are accumulated
+    # silently (continue, no yield) — mirrors the existing message branch.
+    assert len(events) == 1, (
+        f"BUG-3: expected exactly 1 workflow_finished envelope (agent_message "
+        f"frames must accumulate silently); got {len(events)}: "
+        f"{[e.event_type for e in events]}"
+    )
+    terminal = events[0]
+    assert terminal.event_type == "workflow_finished"
+    assert isinstance(terminal.data, WorkflowFinishedData)
+    assert terminal.data.status == "succeeded"
+    assert terminal.data.outputs["answer"] == "Hi there", (
+        f"BUG-3: outputs.answer must be the concatenated agent_message "
+        f"chunks 'Hi there'; got {terminal.data.outputs!r}. Pre-fix this "
+        f"was '' because event_name == 'message' never matched."
+    )
+
+
+async def test_bug3_message_branch_still_accumulates_regression_lock():
+    """BUG-3 regression-lock: the legacy ``message`` event name (used by
+    chat / completion modes when an agent-chat orchestrator is bound to
+    a non-agent app, or by future Dify versions) must still accumulate.
+    """
+    from ncmu_backend.workflow.agent_chat import AgentChatOrchestrator
+
+    frames = [
+        {"event": "message", "answer": "leg"},
+        {"event": "message", "answer": "acy"},
+        {"event": "message_end"},
+    ]
+    stub = _StubDifyClient(frames)
+    orch = AgentChatOrchestrator()
+    run_id, app_id, user_id, inputs = _make_run_args()
+    events = [ev async for ev in orch.run(stub, run_id, app_id, user_id, inputs)]
+
+    assert len(events) == 1
+    terminal = events[0]
+    assert isinstance(terminal.data, WorkflowFinishedData)
+    assert terminal.data.outputs["answer"] == "legacy", (
+        f"BUG-3 regression-lock: message branch must still accumulate; "
+        f"got {terminal.data.outputs!r}"
+    )
