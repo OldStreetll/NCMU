@@ -36,21 +36,36 @@ postgresql = factories.postgresql("postgresql_noproc")
 
 @pytest.fixture(scope="session", autouse=True)
 def _drop_stale_test_database():
-    """B-NEW-30: pre-drop any stale ``ncmu_test`` left from crashed prior runs.
+    """B-NEW-30: pre + post drop the ephemeral test DBs so no stale state
+    leaks across pytest sessions.
 
     pytest-postgresql's ``DatabaseJanitor`` only drops the test DB if the
     opt-in ``--postgresql-drop-test-database`` CLI flag is passed
-    (``store_true`` in ``plugin.py``; default False). When the previous
-    pytest invocation died mid-test (Ctrl-C, SIGKILL, network glitch),
-    ``ncmu_test`` is left over and the next run errors with
-    ``psycopg.errors.DuplicateDatabase`` at the very first fixture setup
-    — masking whichever test you actually want to run.
+    (``store_true`` in ``plugin.py``; default False). That flag has a
+    first-run side effect — the noproc fixture's setup path
+    (``factories/noprocess.py:94``) calls ``janitor.drop()``
+    unconditionally on the template DB (``ncmu_test_tmpl``) before
+    creating it, which fails with ``psycopg.errors.InvalidCatalogName``
+    when the template doesn't already exist — so we don't use it.
 
-    This session-scoped autouse fixture terminates any leftover backends
-    still attached to ``ncmu_test`` and drops the database before the
-    session starts. Connection failures (postgres not up yet) are
-    swallowed so pytest-postgresql's own retry logic surfaces the real
-    error rather than this fixture's symptom.
+    Instead this session-scoped autouse fixture takes ownership of the
+    full lifecycle:
+
+      * **pre-yield (session start)** — drop any stale ``ncmu_test`` and
+        ``ncmu_test_tmpl`` left over from a prior session that died
+        mid-test (Ctrl-C, SIGKILL, network glitch). Without this, the
+        next run errors with ``psycopg.errors.DuplicateDatabase`` at
+        the very first fixture setup, masking whichever test the user
+        actually wanted to run.
+      * **post-yield (session end)** — drop the same two databases so
+        ``\\l`` in pg-ncmu shows a clean state after a normal pytest
+        completion. This is the ``stale template DB`` behaviour
+        B-NEW-30 was filed to eliminate.
+
+    Connection failures (postgres not up yet, insufficient privilege,
+    etc.) are swallowed so this fixture never blocks a test session
+    that doesn't itself touch postgres; pytest-postgresql's own retry
+    logic surfaces real infra errors with clearer messages.
     """
     import psycopg
     admin_dsn = (
@@ -60,23 +75,30 @@ def _drop_stale_test_database():
         f"password={os.environ.get('PYTEST_PG_PASSWORD', 'CHANGE_ME')} "
         f"dbname=ncmu"
     )
-    try:
-        with psycopg.connect(admin_dsn, autocommit=True) as conn:
-            cur = conn.cursor()
-            cur.execute(
-                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
-                "WHERE datname = 'ncmu_test' AND pid <> pg_backend_pid()"
-            )
-            cur.execute("DROP DATABASE IF EXISTS ncmu_test")
-    except psycopg.Error:
-        # Best-effort pre-cleanup: swallow ALL psycopg errors so this
-        # fixture's environment-dependent failures (postgres-not-up /
-        # ncmu-DB-absent / insufficient-privilege) don't block test
-        # sessions that don't even use postgres. pytest-postgresql's
-        # later fixtures will surface real infra errors with clearer
-        # messages.
-        pass
+
+    def _drop_both() -> None:
+        try:
+            with psycopg.connect(admin_dsn, autocommit=True) as conn:
+                cur = conn.cursor()
+                for db in ("ncmu_test", "ncmu_test_tmpl"):
+                    cur.execute(
+                        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                        "WHERE datname = %s AND pid <> pg_backend_pid()",
+                        (db,),
+                    )
+                    cur.execute(f'DROP DATABASE IF EXISTS "{db}"')
+        except psycopg.Error:
+            # Best-effort cleanup: swallow ALL psycopg errors so this
+            # fixture's environment-dependent failures (postgres-not-up /
+            # ncmu-DB-absent / insufficient-privilege) don't block test
+            # sessions that don't even use postgres. pytest-postgresql's
+            # later fixtures will surface real infra errors with clearer
+            # messages.
+            pass
+
+    _drop_both()  # pre-yield: clean state for this session
     yield
+    _drop_both()  # post-yield: leave no stale DB behind for the next session
 
 
 def _run_alembic(url: str, *args: str) -> None:
