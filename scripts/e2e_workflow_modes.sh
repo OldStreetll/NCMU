@@ -203,6 +203,41 @@ for MODE in chat advanced-chat completion workflow agent-chat; do
   [[ "$ACT_AT" -ge "$EXPECT_AT" ]] || PASS=false
   [[ "$ACT_TC" -ge "$EXPECT_TC" ]] || PASS=false
 
+  # TASK-BUG-4 (2026-05-26): content 字段级断言（防 Bug 3 同型 mock-vs-real
+  # wire-shape 错位类 bug — event 计数对但 outputs.answer 永空 / outputs={}
+  # 假 PASS）。守 feedback_tdd_mock_vs_real_api 三支柱「test mock + plan 字面
+  # 字段 + upstream 真代码」全验。
+  #
+  # Wire shape 字面对账（守 feedback_evidence_first）：
+  #   chat/sse.py:24-31  SSE 帧 = `event: <type>\ndata: <JSON>\n\n`
+  #   schemas/sse_events.py:145-166  NcmuSseEvent envelope = event_type/run_id/timestamp/data
+  #   workflow_finished data.outputs.answer 真路径：
+  #     advanced_chat.py:143  outputs={"answer": accumulated_text}
+  #     completion.py:87      outputs={"answer": accumulated_text}
+  #     agent_chat.py:143     outputs={"answer": accumulated_text}
+  #     workflow.py:103       outputs=data.get("outputs") or {}（无 answer 强约束 → 用 keys count 兜底）
+  #
+  # 解析方式：awk 抓 PER_LOG 中首个 `event: workflow_finished` 下一行 `data: <JSON>`，
+  # printf '%s' 喂 jq 避免空 stdin 解析报错；守 feedback_pipe_to_head_masks_exit_code
+  # 不用 `cmd | head` 屏蔽 exit code（awk exit 0 退出本身即首帧截断）。
+  WF_DATA=$(awk 'prev=="event: workflow_finished" && /^data: / {
+                    sub(/^data: /, ""); print; exit
+                }
+                { prev=$0 }' "$PER_LOG")
+  EXPECT_AML=$(jq -r --arg m "$MODE" '.[] | select(.mode == $m) | .expected.answer_min_length // 0' "$FIXTURES")
+  EXPECT_OMK=$(jq -r --arg m "$MODE" '.[] | select(.mode == $m) | .expected.outputs_min_keys // 0' "$FIXTURES")
+  if [[ -n "$WF_DATA" ]]; then
+    ACT_AML=$(printf '%s' "$WF_DATA" | jq -r '.data.outputs.answer // "" | length' 2>/dev/null || true)
+    ACT_AML="${ACT_AML:-0}"
+    ACT_OMK=$(printf '%s' "$WF_DATA" | jq -r '.data.outputs // {} | length' 2>/dev/null || true)
+    ACT_OMK="${ACT_OMK:-0}"
+  else
+    ACT_AML=0
+    ACT_OMK=0
+  fi
+  [[ "$ACT_AML" -ge "$EXPECT_AML" ]] || PASS=false
+  [[ "$ACT_OMK" -ge "$EXPECT_OMK" ]] || PASS=false
+
   # DB 实测：workflow_runs 表新增本 app_id ≥1 行 (status 终态)
   # REWORK-79-A 防御性顺手修 (Pane 5 7 处审外 +1)：psql count(*) 当前不会
   # "stdout 输出 + exit 非 0" 双发 (count 总返 1 行)，但与 grep -c 同 anti-
@@ -213,7 +248,7 @@ for MODE in chat advanced-chat completion workflow agent-chat; do
   DB_RUNS="${DB_RUNS:-0}"
   [[ "$DB_RUNS" -ge 1 ]] || PASS=false
 
-  STATS="NS=$ACT_NS/$EXPECT_NS NF=$ACT_NF/$EXPECT_NF WF=$ACT_WF/$EXPECT_WF AT=$ACT_AT/$EXPECT_AT TC=$ACT_TC/$EXPECT_TC DB=$DB_RUNS"
+  STATS="NS=$ACT_NS/$EXPECT_NS NF=$ACT_NF/$EXPECT_NF WF=$ACT_WF/$EXPECT_WF AT=$ACT_AT/$EXPECT_AT TC=$ACT_TC/$EXPECT_TC AML=$ACT_AML/$EXPECT_AML OMK=$ACT_OMK/$EXPECT_OMK DB=$DB_RUNS"
   if $PASS; then
     MODE_AC_PASS[$MODE]="PASS ($STATS)"
   else
