@@ -191,6 +191,7 @@ describe("<AgentChatPage> (TASK-78)", () => {
     });
 
     await waitFor(() => {
+      expect(screen.getByTestId("tool-call-list")).toBeInTheDocument();
       const cards = screen.getAllByTestId("tool-call-card");
       expect(cards).toHaveLength(1);
       expect(cards[0].getAttribute("data-status")).toBe("completed");
