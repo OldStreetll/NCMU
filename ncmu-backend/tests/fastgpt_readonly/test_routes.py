@@ -232,7 +232,9 @@ async def test_list_files_returns_403_when_user_cannot_access_app(
             headers={"Authorization": f"Bearer {lisi_token}"},
         )
     assert resp.status_code == 403
-    assert "无权访问" in resp.json().get("detail", "")
+    detail = resp.json().get("detail") or {}
+    assert detail.get("code") == 1002, detail
+    assert "无权访问" in detail.get("message", ""), detail
 
 
 async def test_download_rejects_file_id_outside_apps_bound_datasets(
@@ -263,7 +265,9 @@ async def test_download_rejects_file_id_outside_apps_bound_datasets(
         headers={"Authorization": f"Bearer {jwt_token}"},
     )
     assert resp.status_code == 403
-    assert "无权访问" in resp.json().get("detail", "")
+    detail = resp.json().get("detail") or {}
+    assert detail.get("code") == 1002, detail
+    assert "无权访问" in detail.get("message", ""), detail
 
 
 # ─────────────────────────────────────────────── empty-binding paths ──

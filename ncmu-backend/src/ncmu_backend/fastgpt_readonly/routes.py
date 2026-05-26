@@ -117,7 +117,10 @@ async def _ensure_access(
         settings=settings,
     )
     if not allowed:
-        raise HTTPException(status_code=403, detail="无权访问该 App")
+        raise HTTPException(
+            status_code=403,
+            detail={"code": 1002, "message": "无权访问该 App"},
+        )
 
 
 @router.get(
@@ -176,7 +179,10 @@ async def download_kb_file(
     )
     dataset_ids = await _datasets_for_app(db, app_id)
     if not dataset_ids:
-        raise HTTPException(status_code=403, detail="无权访问该文件")
+        raise HTTPException(
+            status_code=403,
+            detail={"code": 1002, "message": "无权访问该文件"},
+        )
 
     try:
         target: Optional[FileMeta] = None
@@ -192,7 +198,10 @@ async def download_kb_file(
                 break
 
         if target is None:
-            raise HTTPException(status_code=403, detail="无权访问该文件")
+            raise HTTPException(
+                status_code=403,
+                detail={"code": 1002, "message": "无权访问该文件"},
+            )
 
         filename_header = target.original_filename or file_id
         stream = client.download_file(file_id)
