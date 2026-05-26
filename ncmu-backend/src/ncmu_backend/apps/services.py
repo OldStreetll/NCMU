@@ -177,3 +177,170 @@ async def user_can_access_app(
         tenant_id=settings.DIFY_TENANT_ID,
     )
     return any(entry.get("id") == app_id for entry in shared_raw)
+
+
+# --------------------------------------------------------------------- #
+# TASK-BUG-2 — App parameters projection (chat user_input_form OR
+# workflow start.variables) → flat ParameterSchema dicts for SPA.
+#
+# docker exec ncmu-backend probe (2026-05-26) — 5 modes in workspace:
+#   completion   → model_config.user_input_form (NESTED: [{"<type>": {...}}])
+#   chat         → model_config.user_input_form (NESTED)
+#   agent-chat   → model_config.user_input_form (NESTED)
+#   workflow     → workflows/draft.graph.nodes[type=start].data.variables (FLAT)
+#   advanced-chat→ workflows/draft.graph.nodes[type=start].data.variables (FLAT)
+# Mode literal value = .mode field (Boss T2.1=A: explicit dispatch).
+# --------------------------------------------------------------------- #
+
+# Dify nested chat-mode type key → SPA ParameterSchema.type字面.
+# Anything not in this map is silently skipped (Boss T1.2=A: SPA falls
+# back to empty form, future Dify type additions don't break endpoint).
+_CHAT_TYPE_MAP: dict[str, str] = {
+    "text-input": "text",
+    "paragraph": "paragraph",
+    "select": "select",
+    "number": "number",
+}
+
+# Dify workflow start.variables type field — already flat. Keys we accept
+# verbatim (SPA contract字面同名). Other types silently skipped.
+_WORKFLOW_TYPES: frozenset[str] = frozenset({"text", "paragraph", "select", "number"})
+
+# Mode literals that store parameters in workflows/draft (vs model_config).
+_WORKFLOW_DISPATCH_MODES: frozenset[str] = frozenset({"workflow", "advanced-chat"})
+
+
+def transform_user_input_form(form: Any) -> list[dict[str, Any]]:
+    """Unwrap Dify chat-mode `model_config.user_input_form` → flat dicts.
+
+    Source shape (live capture, completion app 40f7c243):
+        [{"paragraph": {"label": "Query", "variable": "query",
+                        "required": true, "default": ""}}, ...]
+    Target shape (SPA ParameterSchema dict):
+        [{"variable": "query", "label": "Query", "type": "paragraph",
+          "required": true, "options": []}, ...]
+
+    Skip rules (Boss decisions):
+      - unknown outer type key (not in _CHAT_TYPE_MAP) → skip entry (T1.2=A)
+      - missing variable → skip entry (T1.4=B)
+      - missing label → fallback to variable (T1.4=B)
+    """
+    if not isinstance(form, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for entry in form:
+        if not isinstance(entry, dict) or len(entry) != 1:
+            continue
+        type_key, inner = next(iter(entry.items()))
+        mapped_type = _CHAT_TYPE_MAP.get(type_key)
+        if mapped_type is None or not isinstance(inner, dict):
+            continue
+        variable = inner.get("variable")
+        if not isinstance(variable, str) or not variable:
+            continue
+        label_raw = inner.get("label")
+        label = label_raw if isinstance(label_raw, str) and label_raw else variable
+        options = inner.get("options") if mapped_type == "select" else None
+        options_list = [str(o) for o in options] if isinstance(options, list) else []
+        out.append({
+            "variable": variable,
+            "label": label,
+            "type": mapped_type,
+            "required": bool(inner.get("required") or False),
+            "options": options_list,
+        })
+    return out
+
+
+def transform_workflow_variables(variables: Any) -> list[dict[str, Any]]:
+    """Project Dify workflow start.variables → ParameterSchema dicts.
+
+    Source shape (live capture, workflow app 5e84f3e8):
+        [{"variable": "x", "label": "x", "type": "number", "required": true,
+          "options": [], "placeholder": "", "default": "", "hint": ""}, ...]
+    Target shape: same keys minus placeholder/default/hint.
+
+    Skip rules: type not in _WORKFLOW_TYPES → skip (T1.2=A);
+    missing variable → skip (T1.4=B); missing label → fallback to variable.
+    """
+    if not isinstance(variables, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for entry in variables:
+        if not isinstance(entry, dict):
+            continue
+        var_type = entry.get("type")
+        if var_type not in _WORKFLOW_TYPES:
+            continue
+        variable = entry.get("variable")
+        if not isinstance(variable, str) or not variable:
+            continue
+        label_raw = entry.get("label")
+        label = label_raw if isinstance(label_raw, str) and label_raw else variable
+        options = entry.get("options") if var_type == "select" else None
+        options_list = [str(o) for o in options] if isinstance(options, list) else []
+        out.append({
+            "variable": variable,
+            "label": label,
+            "type": var_type,
+            "required": bool(entry.get("required") or False),
+            "options": options_list,
+        })
+    return out
+
+
+def _extract_start_node_variables(draft: dict[str, Any]) -> list[Any]:
+    """Walk workflows/draft.graph.nodes for the start node's `.data.variables`."""
+    graph = draft.get("graph") or {}
+    nodes = graph.get("nodes") or []
+    if not isinstance(nodes, list):
+        return []
+    for n in nodes:
+        if not isinstance(n, dict):
+            continue
+        data = n.get("data") or {}
+        if isinstance(data, dict) and data.get("type") in ("start", "Start"):
+            vs = data.get("variables")
+            return vs if isinstance(vs, list) else []
+    return []
+
+
+async def get_app_parameters(
+    *,
+    app_id: str,
+    http: httpx.AsyncClient,
+    cache: DifyConsoleClient,
+    settings: Settings,
+) -> list[dict[str, Any]]:
+    """Dispatch on .mode field → fetch the right Dify endpoint → flat dicts.
+
+    Boss T2.1=A: explicit .mode字面 branch (not implicit dict-non-None).
+    Mode literals seen in workspace (docker exec 2026-05-26):
+        workflow / advanced-chat → workflows/draft path
+        completion / chat / agent-chat → model_config path
+    Unknown mode → return [] (safe; SPA `parameters ?? []` tolerates).
+
+    Caller must run user_can_access_app guard FIRST (403 surface).
+    Dify 4xx/5xx propagates as 502 (matches existing /apps endpoint).
+    """
+    detail = await cache.fetch_app_detail(
+        app_id=app_id,
+        http=http,
+        base_url=settings.DIFY_BASE_URL,
+        api_key=settings.DIFY_CONSOLE_API_KEY,
+        tenant_id=settings.DIFY_TENANT_ID,
+    )
+    mode = detail.get("mode")
+    if mode in _WORKFLOW_DISPATCH_MODES:
+        draft = await cache.fetch_workflow_draft(
+            app_id=app_id,
+            http=http,
+            base_url=settings.DIFY_BASE_URL,
+            api_key=settings.DIFY_CONSOLE_API_KEY,
+            tenant_id=settings.DIFY_TENANT_ID,
+        )
+        return transform_workflow_variables(_extract_start_node_variables(draft))
+    model_config = detail.get("model_config") or {}
+    if not isinstance(model_config, dict):
+        return []
+    return transform_user_input_form(model_config.get("user_input_form"))

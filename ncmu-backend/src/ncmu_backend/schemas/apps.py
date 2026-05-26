@@ -31,3 +31,24 @@ class AppOut(BaseModel):
     description: Optional[str] = Field(
         default=None, description="App description from Dify Console"
     )
+
+
+class ParameterOut(BaseModel):
+    """One input field projected for SPA DynamicInputForm (TASK-BUG-2).
+
+    Mirrors SPA `ParameterSchema` at
+    ncmu-spa/src/components/workflow/DynamicInputForm.tsx:3-9 — the SPA
+    consumes `list[ParameterOut]` flat from GET /apps/{id}/parameters and
+    pipes each entry into one antd Form.Item.
+    """
+
+    variable: str = Field(..., description="Form field name (becomes inputs key)")
+    label: str = Field(..., description="Display label")
+    type: Literal["text", "paragraph", "select", "number"] = Field(
+        ..., description="UI widget kind"
+    )
+    required: bool = Field(default=False, description="Antd Form 'required' rule")
+    options: list[str] = Field(
+        default_factory=list,
+        description="Select options (empty for non-select types)",
+    )

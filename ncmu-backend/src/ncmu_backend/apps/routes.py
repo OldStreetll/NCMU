@@ -13,7 +13,7 @@ import logging
 from functools import lru_cache
 
 import httpx
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ncmu_backend.apps import services
@@ -22,7 +22,7 @@ from ncmu_backend.config import Settings
 from ncmu_backend.db.session import get_db
 from ncmu_backend.deps import CurrentUser, get_current_user, get_settings
 from ncmu_backend.main import get_dify_client
-from ncmu_backend.schemas.apps import AppOut
+from ncmu_backend.schemas.apps import AppOut, ParameterOut
 
 log = logging.getLogger("ncmu_backend.apps.routes")
 
@@ -71,5 +71,51 @@ async def list_apps(
     log.info(
         "GET /api/v1/ncmu/apps user=%s merged=%d returned=%d",
         user.sub, len(merged), len(out),
+    )
+    return out
+
+
+@router.get(
+    "/api/v1/ncmu/apps/{app_id}/parameters",
+    response_model=list[ParameterOut],
+    summary="App input form schema (chat user_input_form OR workflow start.variables)",
+)
+async def get_app_parameters(
+    app_id: str,
+    user: CurrentUser = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+    http: httpx.AsyncClient = Depends(get_dify_client),
+    cache: DifyConsoleClient = Depends(get_dify_console_client),
+    db: AsyncSession = Depends(get_db),
+) -> list[ParameterOut]:
+    """TASK-BUG-2 — SPA useAppParameters source-of-truth.
+
+    Dispatch (Boss T2.1=A): app.mode literal == "workflow"/"advanced-chat"
+    → workflows/draft start.variables; else → model_config.user_input_form.
+    Returns flat list[ParameterOut] = SPA ParameterSchema[].
+
+    Permission (reuses services.user_can_access_app): owner OR shared via
+    DifyConsoleClient cache; 403 if neither path admits user.
+    """
+    allowed = await services.user_can_access_app(
+        db=db,
+        user_id=user.sub,
+        app_id=app_id,
+        http=http,
+        cache=cache,
+        settings=settings,
+    )
+    if not allowed:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"code": 1002, "message": "App not accessible by current user"},
+        )
+    raw = await services.get_app_parameters(
+        app_id=app_id, http=http, cache=cache, settings=settings,
+    )
+    out = [ParameterOut(**entry) for entry in raw]
+    log.info(
+        "GET /api/v1/ncmu/apps/%s/parameters user=%s returned=%d",
+        app_id, user.sub, len(out),
     )
     return out

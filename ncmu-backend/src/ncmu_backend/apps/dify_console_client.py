@@ -80,6 +80,64 @@ def detect_app_type(name: str, tags: Optional[Iterable[Any]] = None) -> bool:
 
 
 # --------------------------------------------------------------------- #
+# Shared Dify Console fetch wrapper — used by NEW methods (TASK-BUG-2).
+# Existing list_apps_for_user / _fetch are 字面禁区 (C4 / C-INDEP-1 ruling)
+# and keep their inline error handling.
+# --------------------------------------------------------------------- #
+async def _request_dify_json(
+    *,
+    http: httpx.AsyncClient,
+    method: str,
+    url: str,
+    api_key: str,
+    tenant_id: str,
+) -> Any:
+    """httpx wrapper for Dify Console GET — auth headers + error mapping.
+
+    Returns parsed JSON (dict or list). Raises HTTPException(502, ...)
+    with same {code, message} shape as `_fetch` for transport / >=400 /
+    non-JSON failures.
+    """
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "X-WORKSPACE-ID": tenant_id,
+    }
+    try:
+        resp = await http.request(method, url, headers=headers)
+    except httpx.HTTPError as exc:
+        log.warning("dify_console_client transport error: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={
+                "code": 9001,
+                "message": f"Dify Console unreachable: {exc.__class__.__name__}",
+            },
+        ) from exc
+
+    if resp.status_code >= 400:
+        ncmu_code = dify_status_to_ncmu(resp.status_code)
+        log.warning(
+            "dify_console_client upstream %s -> ncmu code %s",
+            resp.status_code, ncmu_code,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={
+                "code": ncmu_code,
+                "message": f"Dify Console returned HTTP {resp.status_code}",
+            },
+        )
+
+    try:
+        return resp.json()
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={"code": 9001, "message": "Dify Console response is not JSON"},
+        ) from exc
+
+
+# --------------------------------------------------------------------- #
 # DifyConsoleClient — wraps httpx + adds per-user TTL cache
 # --------------------------------------------------------------------- #
 class DifyConsoleClient:
@@ -211,3 +269,53 @@ class DifyConsoleClient:
         if isinstance(payload, list):
             return payload
         return []
+
+    # ----- TASK-BUG-2 new endpoint methods (no cache; per-request live) --
+    # docker exec evidence (2026-05-26 / Boss T1.1=C ruling):
+    #   GET /console/api/apps/{id}/parameters → 404 (path不存在)
+    #   GET /console/api/apps/{id}               → 200, body.model_config /
+    #                                              body.workflow / .mode literal
+    #   GET /console/api/apps/{id}/workflows/draft → 200 for mode∈{workflow,
+    #                                              advanced-chat}, body.graph.nodes
+    # Bearer admin_key + X-WORKSPACE-ID auth pattern reused from _fetch.
+
+    async def fetch_app_detail(
+        self,
+        *,
+        app_id: str,
+        http: httpx.AsyncClient,
+        base_url: str,
+        api_key: str,
+        tenant_id: str,
+    ) -> dict[str, Any]:
+        """GET /console/api/apps/{app_id} → raw Dify app detail dict.
+
+        Caller reads `.mode` to dispatch + `.model_config.user_input_form`
+        (chat / completion / agent-chat) or hops to `fetch_workflow_draft`
+        (workflow / advanced-chat).
+        """
+        url = f"{base_url.rstrip('/')}/console/api/apps/{app_id}"
+        payload = await _request_dify_json(
+            http=http, method="GET", url=url, api_key=api_key, tenant_id=tenant_id,
+        )
+        return payload if isinstance(payload, dict) else {}
+
+    async def fetch_workflow_draft(
+        self,
+        *,
+        app_id: str,
+        http: httpx.AsyncClient,
+        base_url: str,
+        api_key: str,
+        tenant_id: str,
+    ) -> dict[str, Any]:
+        """GET /console/api/apps/{app_id}/workflows/draft → raw draft dict.
+
+        Caller walks `body.graph.nodes[]` looking for `data.type == "start"`
+        to extract `data.variables` (flat ParameterSchema-shaped list).
+        """
+        url = f"{base_url.rstrip('/')}/console/api/apps/{app_id}/workflows/draft"
+        payload = await _request_dify_json(
+            http=http, method="GET", url=url, api_key=api_key, tenant_id=tenant_id,
+        )
+        return payload if isinstance(payload, dict) else {}
