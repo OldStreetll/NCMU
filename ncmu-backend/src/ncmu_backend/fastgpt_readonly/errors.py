@@ -44,29 +44,29 @@ def translate_to_http_exception(exc: FastGPTError) -> HTTPException:
     if isinstance(exc, FastGPTUnreachable):
         return HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="知识库服务暂时不可用，请稍后再试",
+            detail={"code": 2001, "message": "知识库服务暂时不可用，请稍后再试"},
         )
     if isinstance(exc, FastGPTNotFound):
         return HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="文件已被管理员移除",
+            detail={"code": 2002, "message": "文件已被管理员移除"},
         )
     if isinstance(exc, FastGPTUnauthorized):
         log.error("FastGPT 401/403 — check FASTGPT_API_KEY configuration: %s", exc)
         return HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="知识库配置异常，请联系管理员",
+            detail={"code": 2003, "message": "知识库配置异常，请联系管理员"},
         )
     if isinstance(exc, FastGPTServerError):
         log.error("FastGPT 5xx upstream: %s", exc)
         return HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="知识库服务异常",
+            detail={"code": 2004, "message": "知识库服务异常"},
         )
     log.exception("FastGPT unknown error", exc_info=exc)
     return HTTPException(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        detail="知识库服务异常",
+        detail={"code": 2005, "message": "知识库服务异常"},
     )
 
 

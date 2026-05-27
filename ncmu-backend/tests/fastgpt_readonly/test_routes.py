@@ -311,7 +311,9 @@ async def test_upstream_404_translates_to_404_with_file_removed_copy(
         headers={"Authorization": f"Bearer {jwt_token}"},
     )
     assert resp.status_code == 404
-    assert "已被管理员移除" in resp.json().get("detail", "")
+    detail = resp.json().get("detail") or {}
+    assert detail.get("code") == 2002, detail
+    assert "已被管理员移除" in detail.get("message", ""), detail
 
 
 async def test_upstream_connect_error_translates_to_503_unavailable(
@@ -340,7 +342,9 @@ async def test_upstream_connect_error_translates_to_503_unavailable(
         await mock_client.aclose()
 
     assert resp.status_code == 503
-    assert "暂时不可用" in resp.json().get("detail", "")
+    detail = resp.json().get("detail") or {}
+    assert detail.get("code") == 2001, detail
+    assert "暂时不可用" in detail.get("message", ""), detail
 
 
 async def test_upstream_500_with_auth_marker_surfaces_as_500_admin_copy(
@@ -362,7 +366,9 @@ async def test_upstream_500_with_auth_marker_surfaces_as_500_admin_copy(
         headers={"Authorization": f"Bearer {jwt_token}"},
     )
     assert resp.status_code == 500
-    assert "配置异常" in resp.json().get("detail", "")
+    detail = resp.json().get("detail") or {}
+    assert detail.get("code") == 2003, detail
+    assert "配置异常" in detail.get("message", ""), detail
 
 
 # ────────────────────────────────────── unauthenticated request (AC#7) ──
