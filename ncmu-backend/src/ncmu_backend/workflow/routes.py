@@ -190,8 +190,35 @@ async def list_runs(
     limit: int = 50,
     offset: int = 0,
     user: CurrentUser = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+    http: httpx.AsyncClient = Depends(get_dify_client),
+    cache: DifyConsoleClient = Depends(get_dify_console_client),
     db: AsyncSession = Depends(get_db),
 ):
+    """List runs for ``app_id``, gated by ``services.user_can_access_app``.
+
+    B-NEW-NEW-A — symmetric with POST /run (line 89-101); 403 + code 1002
+    when the caller is neither owner nor shared. Without this gate, the
+    existing ``user_id`` filter inside ``crud.list_runs`` would leak
+    ``app_id`` existence (200 + empty array indistinguishable from
+    "exists but no runs of mine") — the gate enforces the same
+    contract as the other 3 entitled endpoints (apps/routes.py:78,
+    fastgpt_readonly/routes.py:111, workflow/routes.py:89).
+    """
+    allowed = await services.user_can_access_app(
+        db=db,
+        user_id=user.sub,
+        app_id=app_id,
+        http=http,
+        cache=cache,
+        settings=settings,
+    )
+    if not allowed:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"code": 1002, "message": "App not accessible by current user"},
+        )
+
     user_id = uuid.UUID(user.sub)
     runs = await crud.list_runs(db, app_id, user_id, limit=limit, offset=offset)
     return [

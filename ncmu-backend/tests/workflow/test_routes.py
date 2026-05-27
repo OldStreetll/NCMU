@@ -433,3 +433,118 @@ async def test_run_workflow_owner_path_short_circuits_shared(
         app.dependency_overrides.pop(get_dispatcher, None)
         app.dependency_overrides.pop(get_dify_client, None)
         app.dependency_overrides.pop(get_dify_console_client, None)
+
+
+# --------------------------------------------------------------------- #
+# (j) B-NEW-NEW-A — GET list_runs gate: non-owner non-shared → 403 +
+# detail.code 1002. Mirror of (h) for POST /run; closes contract micro-
+# asymmetry between workflow's 4 endpoints. Uses raw ``app_client`` so
+# the real ``services.user_can_access_app`` runs (routes_client mocks
+# it allow-all for the routing/mode/SSE tests above).
+# --------------------------------------------------------------------- #
+APP_FORBIDDEN_LIST = "app-bnnnew-a-forbidden"
+
+
+async def test_list_runs_403_when_app_not_accessible(
+    app_client, async_db, jwt_token,
+):
+    from ncmu_backend.apps.dify_console_client import DifyConsoleClient
+    from ncmu_backend.apps.routes import get_dify_console_client
+    from ncmu_backend.main import app, get_dify_client
+
+    # Seed dify_apps row so the app_id is real — but no app_owners row
+    # → owner path returns False → shared path queried → returns False
+    # (respx mocks empty data) → gate refuses with 403.
+    await async_db.execute(text(
+        "INSERT INTO dify_apps (dify_app_id, name, mode) "
+        "VALUES (:a, 'Forbidden List', 'advanced-chat')"
+    ), {"a": APP_FORBIDDEN_LIST})
+    await async_db.commit()
+
+    dcc = DifyConsoleClient(ttl_seconds=300)
+    test_http = httpx.AsyncClient(timeout=httpx.Timeout(5.0))
+    app.dependency_overrides[get_dify_console_client] = lambda: dcc
+    app.dependency_overrides[get_dify_client] = lambda: test_http
+
+    try:
+        with respx.mock(assert_all_called=True) as rx:
+            rx.get(url__regex=r".*/console/api/apps\?.*").mock(
+                return_value=Response(200, json={"data": []})
+            )
+            resp = await app_client.get(
+                f"/api/v1/ncmu/workflow/apps/{APP_FORBIDDEN_LIST}/runs",
+                headers=_bearer(jwt_token),
+            )
+            # 字段级断言 (守 feedback_pre_existing_error_strict_validation):
+            # not just "non-200" — exact code 1002 contract carries 403
+            # semantics distinct from 1001 (auth) / 404 (not found).
+            assert resp.status_code == 403
+            assert resp.json() == {
+                "detail": {
+                    "code": 1002,
+                    "message": "App not accessible by current user",
+                }
+            }
+    finally:
+        app.dependency_overrides.pop(get_dify_console_client, None)
+        app.dependency_overrides.pop(get_dify_client, None)
+        await test_http.aclose()
+
+
+# --------------------------------------------------------------------- #
+# (k) B-NEW-NEW-A — GET list_runs gate: owner short-circuits (DB
+# app_owners exists() → True → cache.list_apps_for_user is NEVER
+# called → list_runs body executes → 200 + empty array). Regression-
+# locks the existing list shape; proves owner-path doesn't 403.
+# --------------------------------------------------------------------- #
+APP_OWNED_FOR_LIST = "app-bnnnew-a-owned"
+
+
+async def test_list_runs_owner_pass(
+    app_client, async_db, jwt_token, monkeypatch,
+):
+    from ncmu_backend.apps.dify_console_client import DifyConsoleClient
+    from ncmu_backend.apps.routes import get_dify_console_client
+    from ncmu_backend.main import app, get_dify_client
+
+    await async_db.execute(text(
+        "INSERT INTO dify_apps (dify_app_id, name, mode) "
+        "VALUES (:a, 'Owned List', 'advanced-chat')"
+    ), {"a": APP_OWNED_FOR_LIST})
+    await async_db.execute(text(
+        "INSERT INTO app_owners (app_id, owner_user_id, visibility) "
+        "VALUES (:a, :uid, 'owner_only')"
+    ), {"a": APP_OWNED_FOR_LIST, "uid": str(ADMIN_USER_ID)})
+    await async_db.commit()
+
+    async def _shared_must_not_run(self, *args: Any, **kwargs: Any) -> list[dict]:
+        raise AssertionError(
+            "owner short-circuit failed — shared path reached for list_runs. "
+            "user_can_access_app should have returned True via DB owner "
+            "check before hitting DifyConsoleClient."
+        )
+    monkeypatch.setattr(
+        "ncmu_backend.apps.dify_console_client.DifyConsoleClient.list_apps_for_user",
+        _shared_must_not_run,
+    )
+
+    # http is unused on the owner short-circuit path but FastAPI still
+    # injects it; None is fine because list_apps_for_user is monkey-
+    # patched to fail if reached. Real DifyConsoleClient for the cache
+    # dep — same proof-shape as test (i) above.
+    app.dependency_overrides[get_dify_client] = lambda: None
+    app.dependency_overrides[get_dify_console_client] = lambda: DifyConsoleClient(ttl_seconds=300)
+
+    try:
+        resp = await app_client.get(
+            f"/api/v1/ncmu/workflow/apps/{APP_OWNED_FOR_LIST}/runs",
+            headers=_bearer(jwt_token),
+        )
+        # 200 + [] = gate passed (existing list body executed; no runs
+        # seeded so empty array). Regression-locks the pre-gate list
+        # shape — if gate accidentally 403s owners, this fails.
+        assert resp.status_code == 200
+        assert resp.json() == []
+    finally:
+        app.dependency_overrides.pop(get_dify_client, None)
+        app.dependency_overrides.pop(get_dify_console_client, None)
