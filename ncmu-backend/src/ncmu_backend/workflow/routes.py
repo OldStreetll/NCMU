@@ -34,10 +34,10 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ncmu_backend.apps import services
 from ncmu_backend.apps.dify_console_client import DifyConsoleClient
 from ncmu_backend.apps.routes import get_dify_console_client
 from ncmu_backend.auth.deps import CurrentUser, get_current_user
+from ncmu_backend.auth.permissions import user_can_access_app
 from ncmu_backend.chat.sse import encode_sse_frame
 from ncmu_backend.config import Settings
 from ncmu_backend.db.models import WorkflowRun
@@ -81,12 +81,12 @@ async def run_workflow(
     B2 注册前若 mode='advanced-chat' 等会抛 KeyError → 下方 except 捕获 →
     SSE error event code=503。
 
-    TASK-BUG-5 — gated by ``services.user_can_access_app`` (owner OR
-    shared via DifyConsoleClient cache) so a logged-in user cannot trigger
-    workflow runs against apps they aren't entitled to. Same shape as
-    apps/routes.py:78 and fastgpt_readonly/routes.py:111; 403 + code 1002.
+    TASK-BUG-5 — gated by ``auth.permissions.user_can_access_app`` (owner
+    OR shared via DifyConsoleClient cache) so a logged-in user cannot
+    trigger workflow runs against apps they aren't entitled to. Same shape
+    as apps/routes.py:78 and fastgpt_readonly/routes.py:111; 403 + code 1002.
     """
-    allowed = await services.user_can_access_app(
+    allowed = await user_can_access_app(
         db=db,
         user_id=user.sub,
         app_id=app_id,
@@ -195,7 +195,7 @@ async def list_runs(
     cache: DifyConsoleClient = Depends(get_dify_console_client),
     db: AsyncSession = Depends(get_db),
 ):
-    """List runs for ``app_id``, gated by ``services.user_can_access_app``.
+    """List runs for ``app_id``, gated by ``auth.permissions.user_can_access_app``.
 
     B-NEW-NEW-A — symmetric with POST /run (line 89-101); 403 + code 1002
     when the caller is neither owner nor shared. Without this gate, the
@@ -205,7 +205,7 @@ async def list_runs(
     contract as the other 3 entitled endpoints (apps/routes.py:78,
     fastgpt_readonly/routes.py:111, workflow/routes.py:89).
     """
-    allowed = await services.user_can_access_app(
+    allowed = await user_can_access_app(
         db=db,
         user_id=user.sub,
         app_id=app_id,

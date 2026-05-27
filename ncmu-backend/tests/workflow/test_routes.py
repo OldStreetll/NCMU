@@ -45,10 +45,11 @@ async def routes_client(app_client, async_db, monkeypatch):
       - ``dify_apps`` has 1 ``advanced-chat`` row (APP_ID) + 1 ``chat`` row
         (APP_ID_CHAT) for the mode-routing matrix.
       - ``get_dispatcher`` is overridden with a fresh empty ModeDispatcher.
-      - ``services.user_can_access_app`` is mocked to return True so the
-        TASK-BUG-5 gate doesn't 403 these mode/routing/SSE-flow tests
-        (they pre-date the gate and exercise different behaviour). The
-        dedicated gate tests at the bottom of the file use
+      - ``auth.permissions.user_can_access_app`` is mocked (at the
+        ``workflow.routes`` import site / "where to patch" rule) to return
+        True so the TASK-BUG-5 gate doesn't 403 these mode/routing/SSE-flow
+        tests (they pre-date the gate and exercise different behaviour).
+        The dedicated gate tests at the bottom of the file use
         ``app_client`` directly with explicit owner/shared seeding.
     """
     from ncmu_backend.apps.routes import get_dify_console_client
@@ -64,7 +65,7 @@ async def routes_client(app_client, async_db, monkeypatch):
     async def _allow_all(**_kw: Any) -> bool:
         return True
     monkeypatch.setattr(
-        "ncmu_backend.workflow.routes.services.user_can_access_app",
+        "ncmu_backend.workflow.routes.user_can_access_app",
         _allow_all,
     )
     # TASK-BUG-5 gate added http/cache deps to run_workflow; since
@@ -275,8 +276,8 @@ async def test_event_stream_h_fresh_2_cancellation_finalizes_cancelled(
 # (h) TASK-BUG-5 — POST /run gate: non-owner non-shared user → 403 +
 # detail.code 1002 (字段级断言 / 守 feedback_pre_existing_error_strict_
 # validation). Uses raw ``app_client`` instead of ``routes_client`` so
-# the real ``services.user_can_access_app`` runs (routes_client mocks it
-# allow-all for the routing/mode/SSE tests above).
+# the real ``auth.permissions.user_can_access_app`` runs (routes_client
+# mocks it allow-all for the routing/mode/SSE tests above).
 # --------------------------------------------------------------------- #
 APP_FORBIDDEN = "app-bug5-forbidden"
 
@@ -439,8 +440,8 @@ async def test_run_workflow_owner_path_short_circuits_shared(
 # (j) B-NEW-NEW-A — GET list_runs gate: non-owner non-shared → 403 +
 # detail.code 1002. Mirror of (h) for POST /run; closes contract micro-
 # asymmetry between workflow's 4 endpoints. Uses raw ``app_client`` so
-# the real ``services.user_can_access_app`` runs (routes_client mocks
-# it allow-all for the routing/mode/SSE tests above).
+# the real ``auth.permissions.user_can_access_app`` runs (routes_client
+# mocks it allow-all for the routing/mode/SSE tests above).
 # --------------------------------------------------------------------- #
 APP_FORBIDDEN_LIST = "app-bnnnew-a-forbidden"
 

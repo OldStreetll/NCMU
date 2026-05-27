@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ncmu_backend.apps import services
 from ncmu_backend.apps.dify_console_client import DifyConsoleClient
+from ncmu_backend.auth.permissions import user_can_access_app
 from ncmu_backend.config import Settings
 from ncmu_backend.db.session import get_db
 from ncmu_backend.deps import CurrentUser, get_current_user, get_settings
@@ -94,10 +95,10 @@ async def get_app_parameters(
     → workflows/draft start.variables; else → model_config.user_input_form.
     Returns flat list[ParameterOut] = SPA ParameterSchema[].
 
-    Permission (reuses services.user_can_access_app): owner OR shared via
-    DifyConsoleClient cache; 403 if neither path admits user.
+    Permission (reuses auth.permissions.user_can_access_app): owner OR
+    shared via DifyConsoleClient cache; 403 if neither path admits user.
     """
-    allowed = await services.user_can_access_app(
+    allowed = await user_can_access_app(
         db=db,
         user_id=user.sub,
         app_id=app_id,

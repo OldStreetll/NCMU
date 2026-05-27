@@ -355,7 +355,7 @@ async def test_owner_path_admits_user(parameters_client, jwt_token):
     await _seed_owner(db, aid, "私人 App", "completion")
     with respx.mock(assert_all_called=True) as rx:
         # NO list mock — owner path short-circuits before shared cache call
-        # (守 services.user_can_access_app 真实分支：DB exists → True → 跳过 cache).
+        # (守 auth.permissions.user_can_access_app 真实分支：DB exists → True → 跳过 cache).
         rx.get(url__regex=rf".*/console/api/apps/{aid}$").mock(
             return_value=Response(200, json={
                 "id": aid, "mode": "completion",

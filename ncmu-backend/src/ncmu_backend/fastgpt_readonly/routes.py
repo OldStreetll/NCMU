@@ -1,6 +1,6 @@
 """Employee-facing read-only KB endpoints (plan §4.3 AC#5 / errata-13 §2.3).
 
-Two routes, both gated by ``apps.services.user_can_access_app`` so the
+Two routes, both gated by ``auth.permissions.user_can_access_app`` so the
 caller can only see files for Apps they're entitled to chat with (shared
 ∪ owner / spec §3.3 dual-track).
 
@@ -27,7 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ncmu_backend.apps.dify_console_client import DifyConsoleClient
 from ncmu_backend.apps.routes import get_dify_console_client
-from ncmu_backend.apps.services import user_can_access_app
+from ncmu_backend.auth.permissions import user_can_access_app
 from ncmu_backend.config import Settings
 from ncmu_backend.db.session import get_db
 from ncmu_backend.deps import CurrentUser, get_current_user, get_settings

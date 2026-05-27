@@ -323,14 +323,14 @@ async def test_can_access_owner_hit(
     async_db, http_client, fresh_cache, test_settings,
 ):
     """owner 路径命中 → True；不调 Dify Console (节省 RTT)."""
-    from ncmu_backend.apps import services
+    from ncmu_backend.auth.permissions import user_can_access_app
     await _seed_owner(async_db, app_id="my-private-app", owner_uuid=ZHANGSAN_UUID)
     with respx.mock(assert_all_called=False) as rx:
         # The Dify Console mock is registered but NOT expected to be called
         dify_route = rx.get(url__regex=r".*/console/api/apps.*").mock(
             return_value=Response(200, json={"data": []})
         )
-        ok = await services.user_can_access_app(
+        ok = await user_can_access_app(
             db=async_db,
             user_id=ZHANGSAN_UUID,
             app_id="my-private-app",
@@ -348,14 +348,14 @@ async def test_can_access_shared_hit(
     async_db, http_client, fresh_cache, test_settings,
 ):
     """owner miss + Dify Console returns matching id → True."""
-    from ncmu_backend.apps import services
+    from ncmu_backend.auth.permissions import user_can_access_app
     with respx.mock(assert_all_called=True) as rx:
         rx.get(url__regex=r".*/console/api/apps.*").mock(
             return_value=Response(200, json={
                 "data": [{"id": "shared-kb-1", "name": "[KB]A", "mode": "chat"}],
             })
         )
-        ok = await services.user_can_access_app(
+        ok = await user_can_access_app(
             db=async_db,
             user_id=ZHANGSAN_UUID,
             app_id="shared-kb-1",
@@ -370,14 +370,14 @@ async def test_can_access_neither_returns_false(
     async_db, http_client, fresh_cache, test_settings,
 ):
     """owner miss + Dify Console has nothing matching → False."""
-    from ncmu_backend.apps import services
+    from ncmu_backend.auth.permissions import user_can_access_app
     with respx.mock(assert_all_called=True) as rx:
         rx.get(url__regex=r".*/console/api/apps.*").mock(
             return_value=Response(200, json={
                 "data": [{"id": "other-app", "name": "[KB]X", "mode": "chat"}],
             })
         )
-        ok = await services.user_can_access_app(
+        ok = await user_can_access_app(
             db=async_db,
             user_id=ZHANGSAN_UUID,
             app_id="non-existent",
@@ -392,13 +392,13 @@ async def test_can_access_dify_5xx_propagates(
     async_db, http_client, fresh_cache, test_settings,
 ):
     """owner miss + Dify 5xx → HTTPException 502 propagates (守 routes 错误码语义)."""
-    from ncmu_backend.apps import services
+    from ncmu_backend.auth.permissions import user_can_access_app
     with respx.mock(assert_all_called=True) as rx:
         rx.get(url__regex=r".*/console/api/apps.*").mock(
             return_value=Response(500, json={"error": "upstream broken"})
         )
         with pytest.raises(HTTPException) as exc_info:
-            await services.user_can_access_app(
+            await user_can_access_app(
                 db=async_db,
                 user_id=ZHANGSAN_UUID,
                 app_id="anything",
@@ -416,12 +416,12 @@ async def test_can_access_empty_app_id_returns_false(
     async_db, http_client, fresh_cache, test_settings,
 ):
     """app_id 空串 → False (plan AC#6 case 'app_id 格式错' / 不抛错优雅退化)."""
-    from ncmu_backend.apps import services
+    from ncmu_backend.auth.permissions import user_can_access_app
     with respx.mock(assert_all_called=False) as rx:
         dify_route = rx.get(url__regex=r".*/console/api/apps.*").mock(
             return_value=Response(200, json={"data": []})
         )
-        ok = await services.user_can_access_app(
+        ok = await user_can_access_app(
             db=async_db,
             user_id=ZHANGSAN_UUID,
             app_id="",
