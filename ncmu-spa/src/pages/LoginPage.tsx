@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Button, Card, Form, Select, Typography, message } from "antd";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import { api, ApiError } from "@/lib/api";
 import { setAuth, type AuthUser } from "@/lib/auth";
 import { zh } from "@/locales/zh";
@@ -13,6 +13,7 @@ type DevLoginResponse = {
 
 export default function LoginPage() {
   const navigate = useNavigate();
+  const location = useLocation();
   const [users, setUsers] = useState<AuthUser[]>([]);
   const [loading, setLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -49,7 +50,14 @@ export default function LoginPage() {
         { skipAuth: true },
       );
       setAuth(resp.jwt, resp.user);
-      navigate("/chat", { replace: true });
+      // TASK-PE-01: post-login landing follows is_admin (admin → /admin,
+      // employee → /staff). If RoleGuard deflected an unauthenticated visit
+      // here, it appended ?returnTo=<original path> — honor that first so
+      // deep-linked visits land where the user intended. URLSearchParams.get
+      // already URL-decodes the value (the encoder is RoleGuard:25).
+      const returnTo = new URLSearchParams(location.search).get("returnTo");
+      const defaultPath = resp.user.is_admin ? "/admin" : "/staff";
+      navigate(returnTo || defaultPath, { replace: true });
     } catch (e: unknown) {
       const msg = e instanceof ApiError ? `${e.status} ${e.message}` : String(e);
       message.error(`${zh.login.failed}: ${msg}`);
