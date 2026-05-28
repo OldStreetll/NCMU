@@ -21,6 +21,8 @@ const WorkflowRunPage = lazy(() => import("@/pages/WorkflowRunPage"));
 const AgentChatPage = lazy(() => import("@/pages/AgentChatPage"));
 // TASK-PC3-A (Phase 2C): employee Personal-KB application page (/my-kb).
 const MyKbPage = lazy(() => import("@/pages/MyKbPage"));
+// TASK-PE-03 (Phase 2E): employee home /staff — Apps by-mode 5-tab landing.
+const StaffHomePage = lazy(() => import("@/pages/StaffHomePage"));
 // TASK-PC3-B (Phase 2C): admin personal-KB list + double-column detail.
 const AdminPersonalKbPage = lazy(() => import("@/pages/AdminPersonalKbPage"));
 const AdminApplicationDetailPage = lazy(
@@ -41,14 +43,11 @@ function RootRedirect() {
   return <Navigate to={getUser()?.is_admin ? "/admin" : "/staff"} replace />;
 }
 
-// TASK-PE-01: inline placeholders for the two role-home routes that PE-03
-// (StaffHomePage) and PE-04 (AdminHomePage) will replace. PE-01's contract
-// is the layout + guard scaffold; the 2 home pages are explicitly carved
-// out into their own batched tasks per plan §1.3 lines 121-122.
-function StaffHomePlaceholder() {
-  return <div data-testid="staff-home-placeholder">员工首页（PE-03 待实现）</div>;
-}
-
+// TASK-PE-01: inline placeholder for the admin-home route that PE-04 will
+// replace. PE-01's contract is the layout + guard scaffold; the home page
+// is explicitly carved out into its own batched task per plan §1.3 line 122.
+// (PE-03 — StaffHomePage — landed 2026-05-28 and now backs the /staff route
+// directly via the lazy import above.)
 function AdminHomePlaceholder() {
   return <div data-testid="admin-home-placeholder">管理后台首页（PE-04 待实现）</div>;
 }
@@ -85,7 +84,7 @@ export function AppRoutes() {
 
       {/* Employee home + the 5 mode pages + Personal-KB (my-kb) all sit
           inside EmployeeLayout and require requiredRole="employee". */}
-      <Route path="/staff" element={employeeRoute(<StaffHomePlaceholder />)} />
+      <Route path="/staff" element={employeeRoute(<StaffHomePage />)} />
       <Route path="/chat" element={employeeRoute(<ChatPage />)} />
       <Route path="/chat/:sessionId" element={employeeRoute(<ChatPage />)} />
       <Route

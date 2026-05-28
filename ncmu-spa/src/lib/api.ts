@@ -229,6 +229,30 @@ export async function runWorkflow(
   }
 }
 
+// --- TASK-PE-03 — list-apps endpoint -----------------------------------
+//
+// `App` mirrors backend `schemas/apps.py:AppOut` (Phase 1 fixed `type:
+// "kb_qa"`). PE-03 Path C (Boss 2026-05-28): plan §3 字面 imported a
+// hallucinated `fetchApps` + `@tanstack/react-query` + an `icon` field
+// that AppOut doesn't carry. Resolution: add the missing one-liner here
+// (mirrors listMyApplications below), keep the project's useState +
+// useEffect + api() helper pattern in the page (no react-query), and
+// fall back to a mode-based emoji for the missing icon.
+export interface App {
+  id: string;
+  name: string;
+  type: "kb_qa";
+  mode: string;
+  description?: string | null;
+}
+
+// GET /api/v1/ncmu/apps — list the Apps the current user can chat with
+// (shared via DifyConsoleClient ∪ owner via app_owners + dify_apps cache
+// — see backend apps/services.py:list_apps_for_user).
+export async function fetchApps(): Promise<App[]> {
+  return api<App[]>("/apps");
+}
+
 // --- TASK-PC3-A — Personal-KB endpoints --------------------------------
 //
 // Backend prefix is `/api/v1/ncmu/personal-kb/applications` (PC2-FIX 2026-05-23,
