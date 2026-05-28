@@ -28,18 +28,47 @@ from typing import Any
 
 import httpx
 from fastapi import APIRouter, Depends
-from sqlalchemy import func, text
+from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ncmu_backend.apps.dify_console_client import DifyConsoleClient
 from ncmu_backend.apps.routes import get_dify_console_client
 from ncmu_backend.auth.deps import CurrentUser, require_admin
-from ncmu_backend.db.models import DifyApp
+from ncmu_backend.db.models import DifyApp, PersonalKbApplication, User
 from ncmu_backend.db.session import get_db
 from ncmu_backend.deps import Settings, get_settings
 from ncmu_backend.main import get_dify_client
+from pydantic import BaseModel, Field
+
 from ncmu_backend.schemas.admin import BindingOut, KbConfigOut, SyncAppsResponse
+
+
+class _AdminStatsOut(BaseModel):
+    """Response for GET /api/v1/ncmu/admin/stats (TASK-PE-04).
+
+    Five counters powering the admin landing-page overview cards.
+    Counts come from the live DB at request time; no caching (call
+    volume is one-per-page-load by a single admin operator).
+
+    tag_count is wired to 0 on baseline 0008 — the Tag/AppTag/UserTag
+    tables are created by PE-05's alembic 0009. Once PE-05 lands, the
+    placeholder is swapped for a real `SELECT count(*) FROM tags`.
+
+    Kept inline here (instead of schemas/admin.py) to stay within
+    TASK-PE-04's file-range; the underscore prefix marks it as a
+    route-local model not part of the schemas/admin public surface.
+    """
+
+    tag_count: int = Field(description="标签总数（PE-05 落地前固定为 0）")
+    user_count: int = Field(description="is_active=true 的用户数")
+    app_count: int = Field(description="dify_apps 缓存表行数（同步自 Dify Console）")
+    pending_personal_kb_count: int = Field(
+        description="status='pending' 的个人 KB 申请数（admin 待办）"
+    )
+    external_kb_config_count: int = Field(
+        description="dify_external_kb_configs 行数"
+    )
 
 router = APIRouter(tags=["admin"])
 
@@ -139,3 +168,36 @@ async def sync_apps(
         upsert_count += 1
     await db.commit()
     return SyncAppsResponse(upserted=upsert_count, total_console=len(raw))
+
+
+@router.get(
+    "/api/v1/ncmu/admin/stats",
+    response_model=_AdminStatsOut,
+    summary="Admin landing page overview counts (5 fields)",
+)
+async def get_admin_stats(
+    _: CurrentUser = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> _AdminStatsOut:
+    user_count = await db.scalar(
+        select(func.count()).select_from(User).where(User.is_active.is_(True))
+    )
+    app_count = await db.scalar(select(func.count()).select_from(DifyApp))
+    pending_personal_kb_count = await db.scalar(
+        select(func.count())
+        .select_from(PersonalKbApplication)
+        .where(PersonalKbApplication.status == "pending")
+    )
+    external_kb_config_count = await db.scalar(
+        text("SELECT count(*) FROM dify_external_kb_configs")
+    )
+    # TODO PE-05: replace 0 with `SELECT count(*) FROM tags` once
+    # alembic 0009 lands the Tag table.
+    tag_count = 0
+    return _AdminStatsOut(
+        tag_count=tag_count,
+        user_count=user_count or 0,
+        app_count=app_count or 0,
+        pending_personal_kb_count=pending_personal_kb_count or 0,
+        external_kb_config_count=external_kb_config_count or 0,
+    )
