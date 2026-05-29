@@ -17,6 +17,10 @@ EXPECTED_TABLES = {
     "app_owners",
     "personal_kb_applications",
     "personal_kb_application_files",
+    # 0009 Phase 2E PE-05 tag 体系三表（issubset 断言据此覆盖新表存在性）
+    "tags",
+    "app_tags",
+    "user_tags",
     "alembic_version",
 }
 
@@ -59,7 +63,7 @@ def test_upgrade_head_creates_all_expected_tables(db_session):
     version = db_session.execute(
         text("SELECT version_num FROM alembic_version")
     ).scalar_one()
-    assert version == "0008", f"预期 alembic_version=0008，实际 {version}"
+    assert version == "0009", f"预期 alembic_version=0009，实际 {version}"
 
     # IMP-INDEP-4: 显式列级断言 — 0006 migration 的核心交付物是
     # dify_apps.api_token VARCHAR(64) NULL。版本号匹配不保证列真被加
@@ -78,7 +82,7 @@ def test_upgrade_head_creates_all_expected_tables(db_session):
 
 
 def test_downgrade_base_drops_all_business_tables(test_db_url):
-    """AC#2: alembic downgrade base 把 4 张表全部清掉，无残余对象。"""
+    """AC#2: alembic downgrade base 把业务表全部清掉，无残余对象。"""
     _run_alembic(test_db_url, "upgrade", "head")
     _run_alembic(test_db_url, "downgrade", "base")
 
@@ -88,6 +92,10 @@ def test_downgrade_base_drops_all_business_tables(test_db_url):
         "chat_sessions",
         "dify_external_kb_configs",
         "dify_app_kb_bindings",
+        # 0009 Phase 2E PE-05 tag 体系三表 — downgrade() 必须 drop（回归保护）
+        "tags",
+        "app_tags",
+        "user_tags",
     }
     assert tables.isdisjoint(business_tables), (
         f"downgrade 后残留业务表：{tables & business_tables}"

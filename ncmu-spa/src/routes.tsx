@@ -34,6 +34,8 @@ const AdminHomePage = lazy(() => import("@/pages/AdminHomePage"));
 // already advertises `/admin/users` in its Sider; this route closes the
 // previously dead link.
 const AdminUsersPage = lazy(() => import("@/pages/AdminUsersPage"));
+// TASK-PE-05 (Phase 2E Batch 2): admin tags CRUD-only page (no binding UI).
+const AdminTagsPage = lazy(() => import("@/pages/AdminTagsPage"));
 
 const lazyFallback = (
   <div style={{ display: "flex", justifyContent: "center", padding: 48 }}>
@@ -116,6 +118,7 @@ export function AppRoutes() {
         element={adminRoute(<AdminApplicationDetailPage />)}
       />
       <Route path="/admin/users" element={adminRoute(<AdminUsersPage />)} />
+      <Route path="/admin/tags" element={adminRoute(<AdminTagsPage />)} />
 
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
