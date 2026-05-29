@@ -473,3 +473,89 @@ export function listKbFiles(appId: string): Promise<KbFile[]> {
 export function getKbFileDownloadUrl(appId: string, fileId: string): string {
   return `${BASE}/kbs/${encodeURIComponent(appId)}/files/${encodeURIComponent(fileId)}/download`;
 }
+
+// --- TASK-PE-05 — admin /admin/tags endpoints -------------------------------
+//
+// Wire shape grounded against ncmu-backend/src/ncmu_backend/admin/tags/
+// {routes,schemas}.py. Mirrors the dict-shape error envelope used by other
+// admin endpoints (``{detail: {code, message}}``); ``ApiError.code`` will
+// carry 1012 (duplicate name) / 1013 (not found) / 1201 (forbidden).
+
+export interface AdminTagOut {
+  id: string;
+  name: string;
+  description: string | null;
+  app_count: number;
+  user_count: number;
+}
+
+export interface AdminTagCreateBody {
+  name: string;
+  description?: string | null;
+}
+
+export interface AdminTagUpdateBody {
+  name?: string;
+  description?: string | null;
+}
+
+// GET /api/v1/ncmu/admin/tags — list all tags + COUNT JOIN (no pagination v1).
+export function listAdminTags(): Promise<AdminTagOut[]> {
+  return api<AdminTagOut[]>("/admin/tags");
+}
+
+// POST /api/v1/ncmu/admin/tags — single create.
+export function createAdminTag(
+  body: AdminTagCreateBody,
+): Promise<AdminTagOut> {
+  return api<AdminTagOut>("/admin/tags", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+// PATCH /api/v1/ncmu/admin/tags/{tag_id} — partial update.
+export function updateAdminTag(
+  tagId: string,
+  body: AdminTagUpdateBody,
+): Promise<AdminTagOut> {
+  return api<AdminTagOut>(`/admin/tags/${encodeURIComponent(tagId)}`, {
+    method: "PATCH",
+    body: JSON.stringify(body),
+  });
+}
+
+// DELETE /api/v1/ncmu/admin/tags/{tag_id} — hard delete (FK CASCADE clears
+// app_tags + user_tags join rows). Returns 204 No Content; api() would
+// explode on resp.json(), so use the direct-fetch pattern (mirror PE-06
+// ``deactivateAdminUser``).
+export async function deleteAdminTag(tagId: string): Promise<void> {
+  const jwt = getJwt();
+  if (!jwt) throw new ApiError(401, undefined, "no jwt");
+  const resp = await fetch(
+    `${BASE}/admin/tags/${encodeURIComponent(tagId)}`,
+    { method: "DELETE", headers: { Authorization: `Bearer ${jwt}` } },
+  );
+  if (!resp.ok) {
+    let body: { code?: number; message?: string; detail?: unknown } = {};
+    try {
+      body = await resp.json();
+    } catch {
+      // empty body / non-json — statusText falls through
+    }
+    const detail = (body as { detail?: unknown }).detail;
+    let message: string = resp.statusText;
+    let code: number | undefined = body.code;
+    if (typeof detail === "string") {
+      message = detail;
+    } else if (detail && typeof detail === "object") {
+      const d = detail as { code?: number; message?: string };
+      code = d.code ?? code;
+      message = d.message ?? message;
+    } else if (body.message) {
+      message = body.message;
+    }
+    throw new ApiError(resp.status, code, message);
+  }
+  // 204 — no body to parse.
+}

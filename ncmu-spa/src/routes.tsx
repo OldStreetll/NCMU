@@ -26,6 +26,8 @@ const AdminPersonalKbPage = lazy(() => import("@/pages/AdminPersonalKbPage"));
 const AdminApplicationDetailPage = lazy(
   () => import("@/pages/AdminApplicationDetailPage"),
 );
+// TASK-PE-05 (Phase 2E Batch 2): admin tags CRUD-only page (no binding UI).
+const AdminTagsPage = lazy(() => import("@/pages/AdminTagsPage"));
 
 const lazyFallback = (
   <div style={{ display: "flex", justifyContent: "center", padding: 48 }}>
@@ -119,6 +121,7 @@ export function AppRoutes() {
         path="/admin/personal-kb/applications/:id"
         element={adminRoute(<AdminApplicationDetailPage />)}
       />
+      <Route path="/admin/tags" element={adminRoute(<AdminTagsPage />)} />
 
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

@@ -189,6 +189,15 @@ _INCLUDED_MODULES = _discover_and_include_routers(app)
 from ncmu_backend.personal_kb import admin_routes as _personal_kb_admin_routes
 app.include_router(_personal_kb_admin_routes.router)
 
+# Phase 2E TASK-PE-05: ``admin.tags.routes`` lives at depth 2
+# (``ncmu_backend.admin.tags.routes``) — the auto-discovery scanner only
+# recurses ``ncmu_backend.<sub>.routes`` (depth 1) so admin sub-package
+# routers ship via the same manual include idiom as PE-06's
+# ``admin.users.routes`` (4-way merge handled by Pane 0 at ff-merge time
+# when PE-06 lands on main).
+from ncmu_backend.admin.tags import routes as _admin_tags_routes
+app.include_router(_admin_tags_routes.router)
+
 
 @app.get("/healthz", tags=["meta"])
 def healthz() -> dict:

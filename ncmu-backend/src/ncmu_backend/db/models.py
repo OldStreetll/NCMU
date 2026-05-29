@@ -317,3 +317,67 @@ class PersonalKbApplicationFile(Base):
     application: Mapped["PersonalKbApplication"] = relationship(
         back_populates="files"
     )
+
+
+# =====================================================================
+# Phase 2E TASK-PE-05 — Tag tables (mirror alembic 0009)
+# ---------------------------------------------------------------------
+# 3 tables for admin tag-management (plan §3 line 868-888 字面):
+#   - tags       PK uuid + unique name + nullable description + 2 timestamps
+#   - app_tags   composite PK (dify_app_id, tag_id) / FK CASCADE on tags.id
+#   - user_tags  composite PK (user_id, tag_id)    / FK CASCADE on both
+# Binding routes deferred to PE-08 (apps↔tags) + PE-09 (users↔tags);
+# this batch ships CRUD-only on the ``tags`` table itself. Join-table
+# ORM classes live here so PE-08/-09 can import without a follow-up
+# migration churn.
+# =====================================================================
+
+
+class Tag(Base):
+    """Admin-managed tag (PE-05 CRUD; PE-08/-09 wire many-to-many bindings)."""
+
+    __tablename__ = "tags"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        primary_key=True,
+        server_default=text("gen_random_uuid()"),
+    )
+    name: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    description: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class AppTag(Base):
+    """App ↔ Tag binding (PE-08 will wire admin UI)."""
+
+    __tablename__ = "app_tags"
+
+    dify_app_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    tag_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("tags.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+
+
+class UserTag(Base):
+    """User ↔ Tag binding (PE-09 will wire admin UI + employee filter)."""
+
+    __tablename__ = "user_tags"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    tag_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("tags.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
