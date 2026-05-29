@@ -28,6 +28,8 @@ const AdminPersonalKbPage = lazy(() => import("@/pages/AdminPersonalKbPage"));
 const AdminApplicationDetailPage = lazy(
   () => import("@/pages/AdminApplicationDetailPage"),
 );
+// TASK-PE-04 (Phase 2E): admin landing page replacing PE-01's placeholder.
+const AdminHomePage = lazy(() => import("@/pages/AdminHomePage"));
 
 const lazyFallback = (
   <div style={{ display: "flex", justifyContent: "center", padding: 48 }}>
@@ -41,15 +43,6 @@ const lazyFallback = (
 function RootRedirect() {
   if (!isAuthenticated()) return <Navigate to="/login" replace />;
   return <Navigate to={getUser()?.is_admin ? "/admin" : "/staff"} replace />;
-}
-
-// TASK-PE-01: inline placeholder for the admin-home route that PE-04 will
-// replace. PE-01's contract is the layout + guard scaffold; the home page
-// is explicitly carved out into its own batched task per plan §1.3 line 122.
-// (PE-03 — StaffHomePage — landed 2026-05-28 and now backs the /staff route
-// directly via the lazy import above.)
-function AdminHomePlaceholder() {
-  return <div data-testid="admin-home-placeholder">管理后台首页（PE-04 待实现）</div>;
 }
 
 // TASK-PE-01: wrap a route element with the employee layout + employee role
@@ -105,7 +98,7 @@ export function AppRoutes() {
       {/* Admin home + admin-only management pages all sit inside AdminLayout
           and require requiredRole="admin". /admin/kb-configs was previously
           unguarded (pre-PE-01 bug); RoleGuard now closes that gap. */}
-      <Route path="/admin" element={adminRoute(<AdminHomePlaceholder />)} />
+      <Route path="/admin" element={adminRoute(<AdminHomePage />)} />
       <Route
         path="/admin/kb-configs"
         element={adminRoute(<AdminKbConfigsPage />)}
