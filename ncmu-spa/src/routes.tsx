@@ -26,6 +26,10 @@ const AdminPersonalKbPage = lazy(() => import("@/pages/AdminPersonalKbPage"));
 const AdminApplicationDetailPage = lazy(
   () => import("@/pages/AdminApplicationDetailPage"),
 );
+// TASK-PE-06 (Phase 2E Batch 2): admin user management CRUD. AdminLayout
+// already advertises `/admin/users` in its Sider; this route closes the
+// previously dead link.
+const AdminUsersPage = lazy(() => import("@/pages/AdminUsersPage"));
 
 const lazyFallback = (
   <div style={{ display: "flex", justifyContent: "center", padding: 48 }}>
@@ -119,6 +123,7 @@ export function AppRoutes() {
         path="/admin/personal-kb/applications/:id"
         element={adminRoute(<AdminApplicationDetailPage />)}
       />
+      <Route path="/admin/users" element={adminRoute(<AdminUsersPage />)} />
 
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

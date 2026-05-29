@@ -473,3 +473,113 @@ export function listKbFiles(appId: string): Promise<KbFile[]> {
 export function getKbFileDownloadUrl(appId: string, fileId: string): string {
   return `${BASE}/kbs/${encodeURIComponent(appId)}/files/${encodeURIComponent(fileId)}/download`;
 }
+
+// --- TASK-PE-06 — admin /admin/users endpoints -----------------------------
+//
+// Wire shape grounded against ncmu-backend/src/ncmu_backend/admin/users/
+// {routes,schemas}.py. Mirrors the dict-shape error envelope used by other
+// admin endpoints (``{detail: {code, message}}``); ``ApiError.code`` will
+// carry 1010 (dingtalk duplicate) / 1011 (not found) / 1201 (forbidden).
+
+export interface AdminUserOut {
+  id: string;
+  name: string;
+  dingtalk_userid: string | null;
+  dept_path: string | null;
+  is_active: boolean;
+  is_admin: boolean;
+  tags: unknown[];
+}
+
+export interface AdminUserList {
+  total: number;
+  items: AdminUserOut[];
+}
+
+export interface AdminUserCreateBody {
+  name: string;
+  dingtalk_userid?: string | null;
+  dept_path?: string | null;
+}
+
+export interface AdminUserUpdateBody {
+  name?: string;
+  dingtalk_userid?: string | null;
+  dept_path?: string | null;
+  is_active?: boolean;
+}
+
+export interface AdminUserListParams {
+  page?: number;
+  size?: number;
+  include_inactive?: boolean;
+  search?: string;
+}
+
+// GET /api/v1/ncmu/admin/users — server-side pagination + search.
+export function listAdminUsers(
+  params: AdminUserListParams = {},
+): Promise<AdminUserList> {
+  const qs = new URLSearchParams();
+  if (params.page !== undefined) qs.set("page", String(params.page));
+  if (params.size !== undefined) qs.set("size", String(params.size));
+  if (params.include_inactive) qs.set("include_inactive", "true");
+  if (params.search) qs.set("search", params.search);
+  const suffix = qs.toString();
+  return api<AdminUserList>(`/admin/users${suffix ? `?${suffix}` : ""}`);
+}
+
+// POST /api/v1/ncmu/admin/users — single create.
+export function createAdminUser(
+  body: AdminUserCreateBody,
+): Promise<AdminUserOut> {
+  return api<AdminUserOut>("/admin/users", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+// PATCH /api/v1/ncmu/admin/users/{user_id} — partial update.
+export function updateAdminUser(
+  userId: string,
+  body: AdminUserUpdateBody,
+): Promise<AdminUserOut> {
+  return api<AdminUserOut>(`/admin/users/${encodeURIComponent(userId)}`, {
+    method: "PATCH",
+    body: JSON.stringify(body),
+  });
+}
+
+// DELETE /api/v1/ncmu/admin/users/{user_id} — soft delete (is_active=false).
+// Returns 204 No Content; api() would explode on resp.json(), so use the
+// same direct-fetch pattern as ``cancelApplication`` above.
+export async function deactivateAdminUser(userId: string): Promise<void> {
+  const jwt = getJwt();
+  if (!jwt) throw new ApiError(401, undefined, "no jwt");
+  const resp = await fetch(
+    `${BASE}/admin/users/${encodeURIComponent(userId)}`,
+    { method: "DELETE", headers: { Authorization: `Bearer ${jwt}` } },
+  );
+  if (!resp.ok) {
+    let body: { code?: number; message?: string; detail?: unknown } = {};
+    try {
+      body = await resp.json();
+    } catch {
+      // empty body / non-json — statusText falls through
+    }
+    const detail = (body as { detail?: unknown }).detail;
+    let message: string = resp.statusText;
+    let code: number | undefined = body.code;
+    if (typeof detail === "string") {
+      message = detail;
+    } else if (detail && typeof detail === "object") {
+      const d = detail as { code?: number; message?: string };
+      code = d.code ?? code;
+      message = d.message ?? message;
+    } else if (body.message) {
+      message = body.message;
+    }
+    throw new ApiError(resp.status, code, message);
+  }
+  // 204 — no body to parse.
+}
