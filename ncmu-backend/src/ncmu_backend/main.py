@@ -203,6 +203,12 @@ app.include_router(_admin_users_routes.router)
 # when PE-06 lands on main).
 from ncmu_backend.admin.tags import routes as _admin_tags_routes
 app.include_router(_admin_tags_routes.router)
+# Phase 2E TASK-PE-07: ``admin.apps.routes`` lives at depth 2
+# (``ncmu_backend.admin.apps.routes``) — same manual-include idiom as the
+# PE-05/-06 admin sub-packages above (the auto-discovery scanner only
+# recurses depth 1). Union-merge handled by Pane 0 at ff-merge time.
+from ncmu_backend.admin.apps import routes as _admin_apps_routes
+app.include_router(_admin_apps_routes.router)
 
 
 @app.get("/healthz", tags=["meta"])

@@ -693,3 +693,68 @@ export async function deleteAdminTag(tagId: string): Promise<void> {
   }
   // 204 — no body to parse.
 }
+
+// --- TASK-PE-07 — admin /admin/apps + /admin/sync_apps endpoints -----------
+//
+// Wire shape grounded against ncmu-backend admin/apps/{routes,schemas}.py
+// (AdminAppOut / AdminAppUpdate) + admin/routes.py SyncAppsResponse. Three
+// facts that differ from the plan §4 sketch (Boss 2026-05-29 拍板):
+//   1. PK is ``dify_app_id`` (string), not a UUID ``id``; no icon/description.
+//   2. POST /admin/sync_apps returns ``{upserted, total_console}`` — NOT the
+//      plan-literal ``{added, updated, deactivated, errors}``. The feedback
+//      Modal renders the real shape.
+//   3. The Dify-webhook path was dropped (spike FAIL): sync is poll-only.
+// Error envelope is the shared ``{detail: {code, message}}``; ApiError.code
+// carries 1014 (app not found) / 1201 (forbidden).
+
+export interface AdminAppOut {
+  dify_app_id: string;
+  name: string;
+  mode: string;
+  is_active: boolean;
+  last_synced_at: string | null;
+  tag_count: number;
+}
+
+export interface AdminAppUpdateBody {
+  is_active?: boolean;
+}
+
+export interface AdminAppListParams {
+  include_inactive?: boolean;
+  search?: string;
+}
+
+// Response of POST /api/v1/ncmu/admin/sync_apps (Phase 2B TASK-67a; reused).
+export interface SyncAppsResponse {
+  upserted: number;
+  total_console: number;
+}
+
+// GET /api/v1/ncmu/admin/apps — admin list (all apps; include_inactive + search).
+export function listAdminApps(
+  params: AdminAppListParams = {},
+): Promise<AdminAppOut[]> {
+  const qs = new URLSearchParams();
+  if (params.include_inactive) qs.set("include_inactive", "true");
+  if (params.search) qs.set("search", params.search);
+  const suffix = qs.toString();
+  return api<AdminAppOut[]>(`/admin/apps${suffix ? `?${suffix}` : ""}`);
+}
+
+// PATCH /api/v1/ncmu/admin/apps/{app_id} — toggle is_active only.
+export function updateAdminApp(
+  appId: string,
+  body: AdminAppUpdateBody,
+): Promise<AdminAppOut> {
+  return api<AdminAppOut>(`/admin/apps/${encodeURIComponent(appId)}`, {
+    method: "PATCH",
+    body: JSON.stringify(body),
+  });
+}
+
+// POST /api/v1/ncmu/admin/sync_apps — manual full sync (path B). Pulls Dify
+// Console /apps + UPSERTs the cache; stamps last_synced_at (alembic 0010).
+export function syncApps(): Promise<SyncAppsResponse> {
+  return api<SyncAppsResponse>("/admin/sync_apps", { method: "POST" });
+}

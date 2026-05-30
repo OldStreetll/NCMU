@@ -36,6 +36,10 @@ const AdminHomePage = lazy(() => import("@/pages/AdminHomePage"));
 const AdminUsersPage = lazy(() => import("@/pages/AdminUsersPage"));
 // TASK-PE-05 (Phase 2E Batch 2): admin tags CRUD-only page (no binding UI).
 const AdminTagsPage = lazy(() => import("@/pages/AdminTagsPage"));
+// TASK-PE-07 (Phase 2E Batch 3): admin App 同步管理页（list + 立即同步 +
+// is_active 切换）. Sync is poll-only (PE-07 spike: Dify v1.13.3 has no
+// outbound webhook).
+const AdminAppsPage = lazy(() => import("@/pages/AdminAppsPage"));
 
 const lazyFallback = (
   <div style={{ display: "flex", justifyContent: "center", padding: 48 }}>
@@ -119,6 +123,7 @@ export function AppRoutes() {
       />
       <Route path="/admin/users" element={adminRoute(<AdminUsersPage />)} />
       <Route path="/admin/tags" element={adminRoute(<AdminTagsPage />)} />
+      <Route path="/admin/apps" element={adminRoute(<AdminAppsPage />)} />
 
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

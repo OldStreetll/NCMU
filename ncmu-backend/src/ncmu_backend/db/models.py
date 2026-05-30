@@ -115,6 +115,17 @@ class DifyApp(Base):
     api_token: Mapped[str | None] = mapped_column(
         String(64), nullable=True
     )
+    # TASK-PE-07 (alembic 0010): admin App-sync surface columns.
+    # is_active gates GET /admin/apps?include_inactive + the PATCH toggle
+    # ("停用" hides an app from employees without dropping the cache row).
+    # last_synced_at is stamped by POST /admin/sync_apps on each UPSERT so
+    # the admin list can show "上次同步"; NULL = never synced since 0010.
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("true")
+    )
+    last_synced_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

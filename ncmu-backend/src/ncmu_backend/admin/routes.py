@@ -156,12 +156,23 @@ async def sync_apps(
             dify_app_id=dify_id,
             name=name,
             mode=mode,
+            # TASK-PE-07 SCOPE-CHANGE (Boss 2026-05-29 拍板 — Option A 正确
+            # 语义补全): stamp on INSERT too, so a brand-new app's first
+            # sync gets a real ``last_synced_at`` instead of NULL-until-
+            # second-sync. Paired with the set_ line below for the UPDATE
+            # branch — same statement, within the approved SCOPE-CHANGE.
+            last_synced_at=func.now(),
         ).on_conflict_do_update(
             index_elements=["dify_app_id"],
             set_={
                 "name": name,
                 "mode": mode,
                 "updated_at": func.now(),
+                # TASK-PE-07 SCOPE-CHANGE (Boss 2026-05-29 拍板 Option A):
+                # stamp the sync time on every UPSERT so the admin list page
+                # (GET /admin/apps) can render "上次同步". alembic 0010 adds
+                # the column; without this line it would stay NULL forever.
+                "last_synced_at": func.now(),
             },
         )
         await db.execute(stmt)
