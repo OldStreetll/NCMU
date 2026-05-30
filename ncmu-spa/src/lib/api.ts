@@ -608,6 +608,88 @@ export async function deactivateAdminUser(userId: string): Promise<void> {
   // 204 — no body to parse.
 }
 
+// --- TASK-PE-10 — admin DSL export endpoints --------------------------------
+//
+// Wire shape grounded against ncmu-backend/src/ncmu_backend/admin/dsl/
+// {routes,schemas}.py. ``dify_app_id`` is the Dify App id (= dify_apps PK,
+// String(64)); there is no separate UUID id, so it threads straight through.
+//
+//   GET  /admin/apps/dsl-candidates  → DslCandidate[] (picker source)
+//   POST /admin/apps/dsl-export      → application/zip blob (+ MANIFEST.json)
+//
+// The ZIP download uses the direct-fetch + blob pattern (mirror
+// AdminApplicationDetailPage ``handleDownload``): ``Authorization`` can't
+// ride an ``<a href>``, and the response is a binary stream, not JSON, so
+// the generic ``api()`` helper (which calls ``resp.json()``) does not fit.
+
+export interface DslCandidate {
+  dify_app_id: string;
+  name: string;
+  mode: string;
+}
+
+// GET /api/v1/ncmu/admin/apps/dsl-candidates — local dify_apps cache rows.
+export function listDslCandidates(): Promise<DslCandidate[]> {
+  return api<DslCandidate[]>("/admin/apps/dsl-candidates");
+}
+
+// Parse ``filename="..."`` out of a Content-Disposition header so the
+// browser download keeps the server-chosen, timestamped name.
+function filenameFromContentDisposition(cd: string | null): string | null {
+  if (!cd) return null;
+  const m = /filename="([^"]+)"/.exec(cd);
+  return m ? m[1] : null;
+}
+
+// POST /api/v1/ncmu/admin/apps/dsl-export — stream a ZIP of the selected
+// Apps' DSL and trigger a browser download. Throws ApiError on non-2xx so
+// the caller can surface a message.
+export async function downloadDslZip(
+  appIds: string[],
+  includeSecret: boolean,
+): Promise<void> {
+  const jwt = getJwt();
+  if (!jwt) throw new ApiError(401, undefined, "no jwt");
+  const resp = await fetch(`${BASE}/admin/apps/dsl-export`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${jwt}`,
+    },
+    body: JSON.stringify({ app_ids: appIds, include_secret: includeSecret }),
+  });
+  if (!resp.ok) {
+    let body: { code?: number; message?: string; detail?: unknown } = {};
+    try {
+      body = await resp.json();
+    } catch {
+      // binary/empty error body — fall through to statusText
+    }
+    const detail = (body as { detail?: unknown }).detail;
+    let message: string = resp.statusText;
+    let code: number | undefined = body.code;
+    if (detail && typeof detail === "object") {
+      const d = detail as { code?: number; message?: string };
+      code = d.code ?? code;
+      message = d.message ?? message;
+    } else if (typeof detail === "string") {
+      message = detail;
+    }
+    throw new ApiError(resp.status, code, message);
+  }
+  const blob = await resp.blob();
+  const blobUrl = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = blobUrl;
+  a.download =
+    filenameFromContentDisposition(resp.headers.get("content-disposition")) ??
+    "ncmu-dify-apps-export.zip";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(blobUrl);
+}
+
 // --- TASK-PE-05 — admin /admin/tags endpoints -------------------------------
 //
 // Wire shape grounded against ncmu-backend/src/ncmu_backend/admin/tags/

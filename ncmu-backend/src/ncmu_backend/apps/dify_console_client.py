@@ -13,6 +13,7 @@ Why a dedicated module:
 from __future__ import annotations
 
 import logging
+import re
 import time
 from typing import Any, Callable, Iterable, Optional
 
@@ -21,6 +22,15 @@ from fastapi import HTTPException, status
 
 
 log = logging.getLogger("ncmu_backend.apps.dify_console_client")
+
+
+# REWORK-PE-10-INDEP #2 — a Dify App id is a UUID-shaped String(64) token.
+# ``export_app`` validates against this at its entry as a defence-in-depth
+# chokepoint (in addition to the schema/Path validation at the route
+# boundary), so no caller can splice ``?``/``&``/``/``/``..`` into the
+# outbound Dify Console URL — closing the include_secret audit-bypass and
+# path-rewrite vectors the indep panel flagged.
+_VALID_DIFY_APP_ID = re.compile(r"^[A-Za-z0-9-]+$")
 
 
 # --------------------------------------------------------------------- #
@@ -91,19 +101,25 @@ async def _request_dify_json(
     url: str,
     api_key: str,
     tenant_id: str,
+    params: Optional[dict[str, Any]] = None,
 ) -> Any:
     """httpx wrapper for Dify Console GET — auth headers + error mapping.
 
     Returns parsed JSON (dict or list). Raises HTTPException(502, ...)
     with same {code, message} shape as `_fetch` for transport / >=400 /
     non-JSON failures.
+
+    ``params`` (optional) is forwarded to httpx so callers pass query args
+    as a dict rather than string-concatenating them into ``url`` — httpx
+    percent-encodes values, which keeps a flag like ``include_secret`` a
+    real, un-spoofable query parameter (REWORK-PE-10-INDEP #2 defence b).
     """
     headers = {
         "Authorization": f"Bearer {api_key}",
         "X-WORKSPACE-ID": tenant_id,
     }
     try:
-        resp = await http.request(method, url, headers=headers)
+        resp = await http.request(method, url, headers=headers, params=params)
     except httpx.HTTPError as exc:
         log.warning("dify_console_client transport error: %s", exc)
         raise HTTPException(
@@ -319,3 +335,64 @@ class DifyConsoleClient:
             http=http, method="GET", url=url, api_key=api_key, tenant_id=tenant_id,
         )
         return payload if isinstance(payload, dict) else {}
+
+    async def export_app(
+        self,
+        *,
+        app_id: str,
+        http: httpx.AsyncClient,
+        base_url: str,
+        api_key: str,
+        tenant_id: str,
+        include_secret: bool = False,
+    ) -> str:
+        """GET /console/api/apps/{app_id}/export → DSL YAML string (TASK-PE-10).
+
+        docker exec evidence (2026-05-30 spike, Boss path-A ruling):
+          GET /console/api/apps/{id}/export?include_secret=<bool> → 200,
+          body is a JSON ENVELOPE ``{"data": "app:\\n  ...\\n"}`` — the YAML
+          lives under ``.data``, it is NOT returned as a raw ``application/yaml``
+          stream. Verified across all 5 modes (completion / agent-chat /
+          advanced-chat / workflow / chat) incl. a CJK-named App.
+
+        ``include_secret`` is forwarded as a query flag; unknown ``app_id``
+        upstream-404s and surfaces here as ``HTTPException(502, code=1003)``
+        via ``_request_dify_json``'s ``>=400`` branch (Dify ``app_not_found``).
+        """
+        # REWORK-PE-10-INDEP #2 — chokepoint guard: reject any app_id that
+        # could break out of the path segment (``?``/``&``/``/``/``..``)
+        # *before* it touches the outbound URL. 400 (not 502) — this is a
+        # caller/input fault, not a Dify upstream failure.
+        if not _VALID_DIFY_APP_ID.match(app_id):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": 1003,
+                    "message": "invalid app_id (expected [A-Za-z0-9-])",
+                },
+            )
+        url = f"{base_url.rstrip('/')}/console/api/apps/{app_id}/export"
+        # include_secret rides ``params=`` (httpx encodes it) — never
+        # string-concatenated, so it cannot be shadowed by an app_id-borne
+        # ``?include_secret=...`` (query first-wins) injection.
+        payload = await _request_dify_json(
+            http=http,
+            method="GET",
+            url=url,
+            api_key=api_key,
+            tenant_id=tenant_id,
+            params={"include_secret": "true" if include_secret else "false"},
+        )
+        data = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(data, str):
+            # Defensive: a fork that returns bare YAML or a malformed envelope
+            # would otherwise hand the route a non-str body. Treat as upstream
+            # contract breakage (9001) rather than silently writing "None".
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail={
+                    "code": 9001,
+                    "message": "Dify Console export missing 'data' YAML string",
+                },
+            )
+        return data
