@@ -203,10 +203,26 @@ app.include_router(_admin_users_routes.router)
 # when PE-06 lands on main).
 from ncmu_backend.admin.tags import routes as _admin_tags_routes
 app.include_router(_admin_tags_routes.router)
+# TASK-MERGE-B3 route-order (CRITICAL): ``admin.dsl`` MUST be included
+# BEFORE ``admin.apps``. PE-10's ``GET /api/v1/ncmu/admin/apps/dsl-candidates``
+# is a static path; PE-07's ``GET /api/v1/ncmu/admin/apps/{app_id}`` is a
+# parametrised path that matches *any* single segment. FastAPI matches across
+# routers in registration order, so if ``admin.apps`` registered first,
+# ``{app_id}`` would swallow ``dsl-candidates`` (app_id="dsl-candidates" →
+# 1014 not-found). Registering ``admin.dsl`` first lets the literal win.
+# (``dsl-export`` is POST and ``{app_id}/dsl`` is 2-segment, so only
+# ``dsl-candidates`` is actually at risk — but keep dsl-first for clarity.)
+# Covered by tests/admin/test_route_order_b3.py.
+#
+# Phase 2E TASK-PE-10: ``admin.dsl.routes`` lives at depth 2
+# (``ncmu_backend.admin.dsl.routes``) — same manual-include idiom as the
+# PE-05/PE-06 admin sub-packages (auto-discovery only recurses depth 1).
+from ncmu_backend.admin.dsl import routes as _admin_dsl_routes
+app.include_router(_admin_dsl_routes.router)
 # Phase 2E TASK-PE-07: ``admin.apps.routes`` lives at depth 2
 # (``ncmu_backend.admin.apps.routes``) — same manual-include idiom as the
 # PE-05/-06 admin sub-packages above (the auto-discovery scanner only
-# recurses depth 1). Union-merge handled by Pane 0 at ff-merge time.
+# recurses depth 1). Included AFTER admin.dsl per the route-order note above.
 from ncmu_backend.admin.apps import routes as _admin_apps_routes
 app.include_router(_admin_apps_routes.router)
 

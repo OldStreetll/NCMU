@@ -40,6 +40,8 @@ const AdminTagsPage = lazy(() => import("@/pages/AdminTagsPage"));
 // is_active 切换）. Sync is poll-only (PE-07 spike: Dify v1.13.3 has no
 // outbound webhook).
 const AdminAppsPage = lazy(() => import("@/pages/AdminAppsPage"));
+// TASK-PE-10 (Phase 2E): admin DSL export page (multi-select + ZIP download).
+const AdminDslExportPage = lazy(() => import("@/pages/AdminDslExportPage"));
 
 const lazyFallback = (
   <div style={{ display: "flex", justifyContent: "center", padding: 48 }}>
@@ -124,6 +126,10 @@ export function AppRoutes() {
       <Route path="/admin/users" element={adminRoute(<AdminUsersPage />)} />
       <Route path="/admin/tags" element={adminRoute(<AdminTagsPage />)} />
       <Route path="/admin/apps" element={adminRoute(<AdminAppsPage />)} />
+      <Route
+        path="/admin/apps/dsl-export"
+        element={adminRoute(<AdminDslExportPage />)}
+      />
 
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
