@@ -8,8 +8,30 @@
 # Reverse proxy: /console, /v1, /api, /files, /explore, /e/ route into
 # dify-nginx (which in turn forwards to dify-api / dify-web /
 # dify-plugin-daemon). /api/v1/ncmu/* is a Phase 1 ncmu-backend slot,
-# placeholder 503 today. / is a Phase 4 ncmu-web landing, static stub.
+# proxied to ncmu-backend. / reverse-proxies the Vite dev server
+# (ncmu-spa:5173) — see TASK-FU-NGINX below.
+#
+# TASK-FU-NGINX (dev profile only; prod = Phase 6 static build):
+#   - / now reverse-proxies the live Vite dev server (ncmu-spa:5173)
+#     instead of the Phase 0 placeholder, so the SPA is reachable through
+#     the single nginx entry point. Vite HMR uses a WebSocket, hence the
+#     Upgrade/Connection headers (the $connection_upgrade map below).
+#   - "跳 Dify" / "跳 FastGPT" admin buttons hit /dify and /fastgpt.
+#     Both Dify (web UI at dify-nginx root) and FastGPT assume they own
+#     the root path and emit absolute asset links, so prefix-proxying them
+#     under /dify or /fastgpt would 404 their bundles. Instead we 302 to
+#     each app's published host port (Dify 8080, FastGPT 3000). $host keeps
+#     the redirect host-agnostic; the ports are the compose-published dev
+#     ports (no nginx env var exists for them — documented dev tradeoff).
 # =====================================================================
+
+# Vite HMR WebSocket upgrade: "upgrade" for WS handshakes, "close" for
+# ordinary HTTP. http-context directive — legal here because the rendered
+# default.conf is included inside nginx.conf's http {} block.
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
 
 server {
     listen ${NCMU_NGINX_HTTP_PORT} default_server;
@@ -76,9 +98,34 @@ server {
     location /mcp      { proxy_pass http://dify-nginx:80; include /etc/nginx/snippets/proxy_common.conf; }
     location /triggers { proxy_pass http://dify-nginx:80; include /etc/nginx/snippets/proxy_common.conf; }
 
-    # ----- root: Phase 4 ncmu-web placeholder ------------------------
+    # ----- external app jump buttons (TASK-FU-NGINX) -----------------
+    # Exact matches so they win over the catch-all `location /` below.
+    # Dify web UI and FastGPT both assume the root path → 302 to their
+    # published dev ports rather than prefix-proxying (which breaks their
+    # absolute asset URLs). $host stays browser-relative; ports are the
+    # compose-published dev ports.
+    location = /dify {
+        return 302 http://$host:8080/;
+    }
+    location = /fastgpt {
+        return 302 http://$host:3000/;
+    }
+
+    # ----- root: reverse-proxy the Vite dev server (TASK-FU-NGINX) ----
+    # The SPA (ncmu-spa) runs `vite dev` on :5173 with client-side
+    # routing; nginx forwards everything not matched above (incl. SPA
+    # deep links, which Vite falls back to index.html). HMR rides a
+    # WebSocket → Upgrade/Connection headers required.
     location / {
-        default_type text/plain;
-        return 200 "NCMU Phase 0 gateway (dev) — ncmu-web will serve this path from Phase 4.\n";
+        proxy_pass http://ncmu-spa:5173;
+
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        proxy_http_version 1.1;
+        proxy_set_header   Upgrade         $http_upgrade;
+        proxy_set_header   Connection      $connection_upgrade;
     }
 }
