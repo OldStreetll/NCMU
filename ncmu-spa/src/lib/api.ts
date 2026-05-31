@@ -900,3 +900,68 @@ export function replaceAppTags(
     { method: "PUT", body: JSON.stringify({ tag_ids: tagIds }) },
   );
 }
+
+// --- TASK-PE-11 — admin DSL import ------------------------------------------
+//
+// Wire shape grounded against ncmu-backend/src/ncmu_backend/admin/dsl/
+// routes.py ``import_dsl``. Multipart (single YAML or ZIP) → per-App result.
+// ``failed[]`` rows are field-level: error_code ∈ YAML_PARSE / DIFY_IMPORT /
+// PLUGIN_MISSING; PLUGIN_MISSING rows also carry ``app_id`` + ``plugin_missing``
+// (the App WAS created in Dify — install the plugin then re-sync).
+
+export interface DslImportSucceeded {
+  filename: string;
+  app_id: string;
+  name: string;
+}
+
+export interface DslImportFailed {
+  filename: string;
+  error_code: "YAML_PARSE" | "DIFY_IMPORT" | "PLUGIN_MISSING" | string;
+  error_message?: string;
+  app_id?: string;
+  name?: string;
+  plugin_missing?: unknown[];
+}
+
+export interface DslImportResult {
+  total: number;
+  succeeded: DslImportSucceeded[];
+  failed: DslImportFailed[];
+}
+
+// POST /api/v1/ncmu/admin/apps/dsl-import — multipart upload (.yaml/.yml/.zip).
+// Direct-fetch + FormData (mirror submitApplication): the generic api() helper
+// sets Content-Type: application/json, which would break multipart boundary
+// negotiation — let the browser set it from the FormData body instead.
+export async function importDsl(file: File): Promise<DslImportResult> {
+  const jwt = getJwt();
+  if (!jwt) throw new ApiError(401, undefined, "no jwt");
+  const form = new FormData();
+  form.append("file", file, file.name);
+  const resp = await fetch(`${BASE}/admin/apps/dsl-import`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${jwt}` },
+    body: form,
+  });
+  if (!resp.ok) {
+    let body: { code?: number; message?: string; detail?: unknown } = {};
+    try {
+      body = await resp.json();
+    } catch {
+      // non-json (413 nginx HTML etc.) — fall through with statusText
+    }
+    const detail = (body as { detail?: unknown }).detail;
+    let message: string = resp.statusText;
+    let code: number | undefined = body.code;
+    if (detail && typeof detail === "object") {
+      const d = detail as { code?: number; message?: string };
+      code = d.code ?? code;
+      message = d.message ?? message;
+    } else if (typeof detail === "string") {
+      message = detail;
+    }
+    throw new ApiError(resp.status, code, message);
+  }
+  return resp.json() as Promise<DslImportResult>;
+}

@@ -42,6 +42,8 @@ const AdminTagsPage = lazy(() => import("@/pages/AdminTagsPage"));
 const AdminAppsPage = lazy(() => import("@/pages/AdminAppsPage"));
 // TASK-PE-10 (Phase 2E): admin DSL export page (multi-select + ZIP download).
 const AdminDslExportPage = lazy(() => import("@/pages/AdminDslExportPage"));
+// TASK-PE-11 (Phase 2E Batch 4): admin DSL import page (YAML/ZIP drag-upload).
+const AdminDslImportPage = lazy(() => import("@/pages/AdminDslImportPage"));
 
 const lazyFallback = (
   <div style={{ display: "flex", justifyContent: "center", padding: 48 }}>
@@ -129,6 +131,10 @@ export function AppRoutes() {
       <Route
         path="/admin/apps/dsl-export"
         element={adminRoute(<AdminDslExportPage />)}
+      />
+      <Route
+        path="/admin/apps/dsl-import"
+        element={adminRoute(<AdminDslImportPage />)}
       />
 
       <Route path="*" element={<Navigate to="/" replace />} />
