@@ -28,6 +28,13 @@ dependencies = [
     # (POST /v1/personal-kb/applications) is the first multipart consumer
     # in the backend. Pinned to the same lower bound FastAPI 0.115+ enforces.
     "python-multipart>=0.0.9,<1",
+    # Phase 2E TASK-PE-11 (SCOPE-CHANGE approved by Boss 2026-05-30):
+    # admin DSL import (POST /admin/apps/dsl-import) calls yaml.safe_load to
+    # parse + validate uploaded App DSL before handing it to Dify. PE-11 is the
+    # first first-party PyYAML consumer; it was only ambiently present in the
+    # image, so declare it explicitly or a clean `pip install .` rebuild drops
+    # it and `import yaml` breaks at runtime.
+    "pyyaml>=6,<7",
 ]
 
 [project.optional-dependencies]

@@ -153,6 +153,58 @@ async def _request_dify_json(
         ) from exc
 
 
+async def _request_dify_raw(
+    *,
+    http: httpx.AsyncClient,
+    method: str,
+    url: str,
+    api_key: str,
+    tenant_id: str,
+    json: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    """Like ``_request_dify_json`` but 4xx-TOLERANT (TASK-PE-11 import flow).
+
+    Dify's DSL-import endpoints answer a *failed* import with HTTP 400 AND a
+    structured body (``{"status":"failed","error":"...","app_id":null}``) — the
+    error is per-App data the caller must surface, not a transport failure. So
+    this returns the parsed dict for 2xx AND 4xx; only transport errors, 5xx,
+    and non-JSON bodies raise HTTPException(502).
+    """
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "X-WORKSPACE-ID": tenant_id,
+    }
+    try:
+        resp = await http.request(method, url, headers=headers, json=json)
+    except httpx.HTTPError as exc:
+        log.warning("dify_console_client transport error: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={
+                "code": 9001,
+                "message": f"Dify Console unreachable: {exc.__class__.__name__}",
+            },
+        ) from exc
+
+    if resp.status_code >= 500:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={
+                "code": 9001,
+                "message": f"Dify Console returned HTTP {resp.status_code}",
+            },
+        )
+
+    try:
+        body = resp.json()
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={"code": 9001, "message": "Dify Console response is not JSON"},
+        ) from exc
+    return body if isinstance(body, dict) else {}
+
+
 # --------------------------------------------------------------------- #
 # DifyConsoleClient — wraps httpx + adds per-user TTL cache
 # --------------------------------------------------------------------- #
@@ -396,3 +448,97 @@ class DifyConsoleClient:
                 },
             )
         return data
+
+    # ----- TASK-PE-11 DSL import (spike 2026-05-30 / Boss path-A) ----------
+    # docker exec evidence:
+    #   POST /console/api/apps/imports  {"mode":"yaml-content","yaml_content":Y}
+    #     → 200 {"id":import_id,"status":"completed","app_id":...,
+    #            "app_mode":...,"error":""}  (app created directly)
+    #     → 400 {"status":"failed","error":"Missing app data ...","app_id":null}
+    #     → "pending" status ⇒ needs confirm
+    #   GET  /console/api/apps/imports/{APP_ID}/check-dependencies   (key=app_id!)
+    #     → 200 {"leaked_dependencies":[...]}   ([] = no missing plugins)
+    #   POST /console/api/apps/imports/{IMPORT_ID}/confirm           (pending only)
+
+    async def import_app(
+        self,
+        *,
+        yaml_content: str,
+        http: httpx.AsyncClient,
+        base_url: str,
+        api_key: str,
+        tenant_id: str,
+    ) -> dict[str, Any]:
+        """POST a single DSL YAML to Dify Console → raw import-result dict.
+
+        Returns Dify's body verbatim (``status`` ∈ completed /
+        completed-with-warnings / pending / failed; plus ``id`` = import_id,
+        ``app_id``, ``app_mode``, ``error``). A *failed* import (HTTP 400 +
+        body) is returned, not raised — the caller classifies it per-App.
+        """
+        url = f"{base_url.rstrip('/')}/console/api/apps/imports"
+        return await _request_dify_raw(
+            http=http, method="POST", url=url, api_key=api_key,
+            tenant_id=tenant_id,
+            json={"mode": "yaml-content", "yaml_content": yaml_content},
+        )
+
+    async def confirm_import(
+        self,
+        *,
+        import_id: str,
+        http: httpx.AsyncClient,
+        base_url: str,
+        api_key: str,
+        tenant_id: str,
+    ) -> dict[str, Any]:
+        """POST imports/{import_id}/confirm — finalise a ``pending`` import.
+
+        ``import_id`` comes from Dify's own import response (trusted), but is
+        still whitelist-guarded before hitting the outbound URL (same
+        chokepoint as ``export_app``). Returns the final import-result dict.
+        """
+        if not _VALID_DIFY_APP_ID.match(import_id):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"code": 1003, "message": "invalid import_id"},
+            )
+        url = (
+            f"{base_url.rstrip('/')}/console/api/apps/imports/{import_id}/confirm"
+        )
+        return await _request_dify_raw(
+            http=http, method="POST", url=url, api_key=api_key,
+            tenant_id=tenant_id,
+        )
+
+    async def check_app_dependencies(
+        self,
+        *,
+        app_id: str,
+        http: httpx.AsyncClient,
+        base_url: str,
+        api_key: str,
+        tenant_id: str,
+    ) -> list[Any]:
+        """GET imports/{app_id}/check-dependencies → ``leaked_dependencies``.
+
+        NOTE the path key is the **app_id** (the freshly-imported app), not
+        the import_id — verified by spike (plan's ``check_dependencies
+        (import_id)`` is wrong). Empty list = no missing plugins.
+        """
+        if not _VALID_DIFY_APP_ID.match(app_id):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"code": 1003, "message": "invalid app_id"},
+            )
+        url = (
+            f"{base_url.rstrip('/')}/console/api/apps/imports/{app_id}"
+            f"/check-dependencies"
+        )
+        payload = await _request_dify_json(
+            http=http, method="GET", url=url, api_key=api_key, tenant_id=tenant_id,
+        )
+        leaked = (
+            payload.get("leaked_dependencies") if isinstance(payload, dict) else None
+        )
+        return leaked if isinstance(leaked, list) else []
