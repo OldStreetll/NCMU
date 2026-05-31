@@ -840,3 +840,63 @@ export function updateAdminApp(
 export function syncApps(): Promise<SyncAppsResponse> {
   return api<SyncAppsResponse>("/admin/sync_apps", { method: "POST" });
 }
+
+// --- TASK-PE-08 — tag ↔ app binding (replace-all, both directions) ----------
+//
+// Wire shape grounded against admin/tags/routes.py + admin/apps/routes.py
+// (PE-08). app_ids are dify_app_id strings (String(64), NOT UUID — the cache
+// PK); tag_ids are tags.id UUIDs (serialized as strings). PUT is replace-all:
+// body lists the FULL desired set; [] clears. Error code 1015 = a listed
+// id doesn't exist (404).
+
+export interface TagAppsOut {
+  tag_id: string;
+  app_ids: string[];
+}
+
+export interface AppTagsOut {
+  dify_app_id: string;
+  tag_ids: string[];
+}
+
+export interface TagAppsReplaceResult {
+  tag_id: string;
+  app_count: number;
+}
+
+export interface AppTagsReplaceResult {
+  dify_app_id: string;
+  tag_count: number;
+}
+
+// GET /api/v1/ncmu/admin/tags/{tag_id}/apps — current bound app ids.
+export function getTagApps(tagId: string): Promise<TagAppsOut> {
+  return api<TagAppsOut>(`/admin/tags/${encodeURIComponent(tagId)}/apps`);
+}
+
+// PUT /api/v1/ncmu/admin/tags/{tag_id}/apps — replace-all bound apps.
+export function replaceTagApps(
+  tagId: string,
+  appIds: string[],
+): Promise<TagAppsReplaceResult> {
+  return api<TagAppsReplaceResult>(
+    `/admin/tags/${encodeURIComponent(tagId)}/apps`,
+    { method: "PUT", body: JSON.stringify({ app_ids: appIds }) },
+  );
+}
+
+// GET /api/v1/ncmu/admin/apps/{app_id}/tags — current bound tag ids.
+export function getAppTags(appId: string): Promise<AppTagsOut> {
+  return api<AppTagsOut>(`/admin/apps/${encodeURIComponent(appId)}/tags`);
+}
+
+// PUT /api/v1/ncmu/admin/apps/{app_id}/tags — replace-all bound tags.
+export function replaceAppTags(
+  appId: string,
+  tagIds: string[],
+): Promise<AppTagsReplaceResult> {
+  return api<AppTagsReplaceResult>(
+    `/admin/apps/${encodeURIComponent(appId)}/tags`,
+    { method: "PUT", body: JSON.stringify({ tag_ids: tagIds }) },
+  );
+}

@@ -31,11 +31,14 @@ import {
   updateAdminTag,
 } from "@/lib/api";
 import { useAdminTags } from "@/hooks/useAdminTags";
+import { BindAppsModal } from "@/pages/AdminTagsPage/BindAppsModal";
 
 export function AdminTagsPage() {
   const { data, isLoading, refetch } = useAdminTags();
   const [createModalOpen, setCreateModalOpen] = useState(false);
   const [editingTag, setEditingTag] = useState<AdminTagOut | null>(null);
+  // TASK-PE-08: tag→apps binding modal target row.
+  const [bindingTag, setBindingTag] = useState<AdminTagOut | null>(null);
 
   // 守 PE-06 REWORK-PE-06-INDEP #5 — declared above ``columns`` so the
   // array's ``onConfirm`` reference is not relying on function hoisting.
@@ -81,6 +84,9 @@ export function AdminTagsPage() {
         <Space>
           <Button size="small" onClick={() => setEditingTag(row)}>
             编辑
+          </Button>
+          <Button size="small" onClick={() => setBindingTag(row)}>
+            绑定 App
           </Button>
           <Popconfirm
             title="确认删除该标签？"
@@ -131,6 +137,16 @@ export function AdminTagsPage() {
             setEditingTag(null);
             refetch();
           }}
+        />
+      )}
+
+      {bindingTag && (
+        <BindAppsModal
+          tagId={bindingTag.id}
+          tagName={bindingTag.name}
+          open
+          onClose={() => setBindingTag(null)}
+          onSaved={refetch}
         />
       )}
     </div>

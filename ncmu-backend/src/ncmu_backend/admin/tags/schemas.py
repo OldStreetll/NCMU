@@ -61,3 +61,34 @@ class TagUpdate(BaseModel):
                 "name cannot be null; omit the field to keep the existing value"
             )
         return v
+
+
+# --------------------------------------------------------------------- #
+# TASK-PE-08 — tag ↔ app binding (replace-all) schemas.
+# --------------------------------------------------------------------- #
+class TagBindAppsRequest(BaseModel):
+    """PUT /admin/tags/{tag_id}/apps body — replace-all set of bound apps.
+
+    ``app_ids`` are ``dify_apps.dify_app_id`` strings (String(64)), NOT
+    UUIDs (Boss 2026-05-29 拍板 — the cache PK is text; plan §4 sketch's
+    ``str(aid)`` wrongly assumed UUIDs). ``[]`` clears all bindings for
+    the tag (idempotent replace-all). Duplicate ids are de-duped server
+    side before insert (the ``app_tags`` composite PK would otherwise
+    raise on a repeated pair).
+    """
+
+    app_ids: list[str] = Field(default_factory=list)
+
+
+class TagAppsOut(BaseModel):
+    """GET /admin/tags/{tag_id}/apps — the tag's currently-bound app ids."""
+
+    tag_id: str
+    app_ids: list[str]
+
+
+class TagAppsReplaceResult(BaseModel):
+    """PUT /admin/tags/{tag_id}/apps echo — final distinct bound count."""
+
+    tag_id: str
+    app_count: int

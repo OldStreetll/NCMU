@@ -36,17 +36,24 @@ from __future__ import annotations
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
-from sqlalchemy import delete
+from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ncmu_backend.admin.tags.schemas import TagCreate, TagOut, TagUpdate
+from ncmu_backend.admin.tags.schemas import (
+    TagAppsOut,
+    TagAppsReplaceResult,
+    TagBindAppsRequest,
+    TagCreate,
+    TagOut,
+    TagUpdate,
+)
 from ncmu_backend.admin.tags.services import (
     get_tag_with_counts,
     list_tags_with_counts,
 )
 from ncmu_backend.auth.deps import CurrentUser, require_admin
-from ncmu_backend.db.models import Tag
+from ncmu_backend.db.models import AppTag, DifyApp, Tag
 from ncmu_backend.db.session import get_db
 
 router = APIRouter(tags=["admin-tags"])
@@ -56,6 +63,21 @@ def _not_found(tag_id: UUID) -> HTTPException:
     return HTTPException(
         status_code=status.HTTP_404_NOT_FOUND,
         detail={"code": 1013, "message": f"tag {tag_id} not found"},
+    )
+
+
+def _binding_targets_not_found(kind: str, missing: list[str]) -> HTTPException:
+    # TASK-PE-08: 1015 — one or more ids in a replace-all binding body do
+    # not exist (next free code after PE-07's 1014). ``app_tags`` has no FK
+    # to ``dify_apps`` (so a phantom ``dify_app_id`` would silently insert),
+    # and the FK to ``tags.id`` would otherwise surface a raw IntegrityError;
+    # validating up-front gives the SPA a clean 404 either way.
+    return HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail={
+            "code": 1015,
+            "message": f"{kind} not found: {', '.join(missing)}",
+        },
     )
 
 
@@ -186,3 +208,73 @@ async def delete_tag(
         raise _not_found(tag_id)
     await db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+# ===================================================================== #
+# TASK-PE-08 — tag ↔ app binding (replace-all). Both directions live with
+# their "owning" resource: tag→apps here, app→tags in admin/apps/routes.py.
+# ===================================================================== #
+@router.get(
+    "/api/v1/ncmu/admin/tags/{tag_id}/apps",
+    response_model=TagAppsOut,
+    summary="List the dify_app_ids currently bound to this tag",
+)
+async def list_tag_apps(
+    tag_id: UUID,
+    _: CurrentUser = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> TagAppsOut:
+    if await db.get(Tag, tag_id) is None:
+        raise _not_found(tag_id)
+    app_ids = (
+        await db.execute(
+            select(AppTag.dify_app_id).where(AppTag.tag_id == tag_id)
+        )
+    ).scalars().all()
+    return TagAppsOut(tag_id=str(tag_id), app_ids=list(app_ids))
+
+
+@router.put(
+    "/api/v1/ncmu/admin/tags/{tag_id}/apps",
+    response_model=TagAppsReplaceResult,
+    summary="Replace-all: set the tag's bound apps to exactly body.app_ids",
+)
+async def replace_tag_apps(
+    tag_id: UUID,
+    body: TagBindAppsRequest,
+    _: CurrentUser = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> TagAppsReplaceResult:
+    """Replace-all binding (plan §4 PE-08 Step 1): delete the tag's
+    existing ``app_tags`` rows, then insert one per (de-duped) app_id.
+
+    Idempotent — PUT the same body twice → identical final state. ``[]``
+    clears all bindings. Validates every app_id exists in ``dify_apps``
+    first (1015) since ``app_tags`` has no FK to ``dify_apps`` and a
+    phantom id would otherwise silently insert.
+    """
+    if await db.get(Tag, tag_id) is None:
+        raise _not_found(tag_id)
+
+    # De-dupe while preserving order; the composite PK (dify_app_id,
+    # tag_id) would raise on a repeated pair within one body.
+    app_ids = list(dict.fromkeys(body.app_ids))
+    if app_ids:
+        existing = set(
+            (
+                await db.execute(
+                    select(DifyApp.dify_app_id).where(
+                        DifyApp.dify_app_id.in_(app_ids)
+                    )
+                )
+            ).scalars().all()
+        )
+        missing = [a for a in app_ids if a not in existing]
+        if missing:
+            raise _binding_targets_not_found("app(s)", missing)
+
+    await db.execute(delete(AppTag).where(AppTag.tag_id == tag_id))
+    for aid in app_ids:
+        db.add(AppTag(dify_app_id=aid, tag_id=tag_id))
+    await db.commit()
+    return TagAppsReplaceResult(tag_id=str(tag_id), app_count=len(app_ids))

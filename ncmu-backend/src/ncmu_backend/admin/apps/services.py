@@ -16,22 +16,43 @@ from __future__ import annotations
 
 from typing import Sequence
 
-from sqlalchemy import select
+from sqlalchemy import Select, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ncmu_backend.admin.apps.schemas import AdminAppOut
-from ncmu_backend.db.models import DifyApp
+from ncmu_backend.db.models import AppTag, DifyApp
 
 
-def _to_out(app: DifyApp) -> AdminAppOut:
-    """Map a ``DifyApp`` ORM row → ``AdminAppOut`` (tag_count placeholder 0)."""
+def _to_out(app: DifyApp, tag_count: int) -> AdminAppOut:
+    """Map a ``DifyApp`` ORM row + its bound-tag count → ``AdminAppOut``."""
     return AdminAppOut(
         dify_app_id=app.dify_app_id,
         name=app.name,
         mode=app.mode,
         is_active=app.is_active,
         last_synced_at=app.last_synced_at,
-        tag_count=0,  # PE-08: replace with app_tags JOIN count.
+        tag_count=tag_count,
+    )
+
+
+def _apps_with_tag_count_query() -> Select:
+    """``select(DifyApp, tag_count)`` with a LEFT JOIN to an ``app_tags``
+    count subquery (mirror of admin/tags/services.py ``_tags_with_counts_query``).
+
+    PE-08: replaces PE-07's literal ``tag_count=0`` placeholder. The
+    subquery groups ``app_tags`` by ``dify_app_id``; ``coalesce(_, 0)``
+    makes apps with no bindings report 0 (not NULL). ``ix`` on
+    ``app_tags`` PK (dify_app_id, tag_id) backs the group-by.
+    """
+    counts = (
+        select(AppTag.dify_app_id, func.count().label("cnt"))
+        .group_by(AppTag.dify_app_id)
+        .subquery("app_tag_counts")
+    )
+    return (
+        select(DifyApp, func.coalesce(counts.c.cnt, 0).label("tag_count"))
+        .select_from(DifyApp)
+        .outerjoin(counts, counts.c.dify_app_id == DifyApp.dify_app_id)
     )
 
 
@@ -41,28 +62,29 @@ async def list_admin_apps(
     include_inactive: bool = False,
     search: str | None = None,
 ) -> list[AdminAppOut]:
-    """All cached apps, name-ordered.
+    """All cached apps + real bound-tag count, name-ordered.
 
     - ``include_inactive=False`` (default) hides ``is_active=false`` rows
       so the admin's default view matches what employees can reach.
     - ``search`` does a case-insensitive substring match on ``name``
       (``ILIKE %term%``); blank/whitespace-only terms are ignored.
     """
-    q = select(DifyApp)
+    q = _apps_with_tag_count_query()
     if not include_inactive:
         q = q.where(DifyApp.is_active.is_(True))
     if search and search.strip():
         q = q.where(DifyApp.name.ilike(f"%{search.strip()}%"))
-    rows = (await db.execute(q.order_by(DifyApp.name))).scalars().all()
-    return [_to_out(a) for a in rows]
+    rows = (await db.execute(q.order_by(DifyApp.name))).all()
+    return [_to_out(row[0], row.tag_count) for row in rows]
 
 
 async def get_admin_app(db: AsyncSession, app_id: str) -> AdminAppOut | None:
-    """Single app by ``dify_app_id`` PK, or None if not found."""
-    app = await db.get(DifyApp, app_id)
-    if app is None:
+    """Single app by ``dify_app_id`` PK + real tag_count, or None if absent."""
+    q = _apps_with_tag_count_query().where(DifyApp.dify_app_id == app_id)
+    row = (await db.execute(q)).first()
+    if row is None:
         return None
-    return _to_out(app)
+    return _to_out(row[0], row.tag_count)
 
 
 __all__: Sequence[str] = (

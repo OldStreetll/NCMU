@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Optional
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -35,7 +36,7 @@ class AdminAppOut(BaseModel):
     last_synced_at: Optional[datetime] = Field(
         default=None, description="上次同步时间（POST /sync_apps 写入）；NULL = 尚未同步"
     )
-    tag_count: int = Field(default=0, description="已绑标签数（PE-08 落地前固定 0）")
+    tag_count: int = Field(default=0, description="已绑标签数（PE-08: app_tags COUNT 真实值）")
 
 
 class AdminAppUpdate(BaseModel):
@@ -48,3 +49,33 @@ class AdminAppUpdate(BaseModel):
     """
 
     is_active: Optional[bool] = Field(default=None)
+
+
+# --------------------------------------------------------------------- #
+# TASK-PE-08 — app ↔ tag binding (replace-all / reverse direction) schemas.
+# --------------------------------------------------------------------- #
+class AppBindTagsRequest(BaseModel):
+    """PUT /admin/apps/{app_id}/tags body — replace-all set of bound tags.
+
+    ``tag_ids`` are ``tags.id`` UUIDs. ``[]`` clears all (idempotent
+    replace-all). Duplicates are de-duped server side. ``app_tags.tag_id``
+    has an FK to ``tags.id``, so nonexistent ids are rejected (404 / 1015)
+    before insert rather than surfacing a raw IntegrityError.
+    """
+
+    tag_ids: list[UUID] = Field(default_factory=list)
+
+
+class AppTagsOut(BaseModel):
+    """GET /admin/apps/{app_id}/tags — the app's currently-bound tag ids
+    (serialized as strings for the SPA Transfer keys)."""
+
+    dify_app_id: str
+    tag_ids: list[str]
+
+
+class AppTagsReplaceResult(BaseModel):
+    """PUT /admin/apps/{app_id}/tags echo — final distinct bound count."""
+
+    dify_app_id: str
+    tag_count: int

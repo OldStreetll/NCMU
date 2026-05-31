@@ -34,6 +34,7 @@ import {
   updateAdminApp,
 } from "@/lib/api";
 import { useAdminApps } from "@/hooks/useAdminApps";
+import { BindTagsModal } from "@/pages/AdminAppsPage/BindTagsModal";
 
 // last_synced_at 渲染：null → "尚未同步"；否则把 ISO 串裁成
 // "YYYY-MM-DD HH:MM"（确定性 / 不依赖 locale，便于测试断言）。
@@ -54,6 +55,8 @@ export function AdminAppsPage() {
   // 禁区，本 task 不实现 / 见 [DONE] 备注）。
   const [syncing, setSyncing] = useState(false);
   const [syncResult, setSyncResult] = useState<SyncAppsResponse | null>(null);
+  // TASK-PE-08: app→tags binding modal target row.
+  const [bindingApp, setBindingApp] = useState<AdminAppOut | null>(null);
 
   async function handleSync() {
     setSyncing(true);
@@ -125,25 +128,31 @@ export function AdminAppsPage() {
     {
       title: "操作",
       key: "actions",
-      width: 120,
-      render: (_v, row) =>
-        row.is_active ? (
-          <Popconfirm
-            title="确认停用该 App？"
-            description="停用后员工将无法访问该 App（缓存与标签绑定保留）"
-            okText="确定"
-            cancelText="取消"
-            onConfirm={() => handleToggleActive(row, false)}
-          >
-            <Button size="small" danger>
-              停用
+      width: 200,
+      render: (_v, row) => (
+        <Space>
+          {row.is_active ? (
+            <Popconfirm
+              title="确认停用该 App？"
+              description="停用后员工将无法访问该 App（缓存与标签绑定保留）"
+              okText="确定"
+              cancelText="取消"
+              onConfirm={() => handleToggleActive(row, false)}
+            >
+              <Button size="small" danger>
+                停用
+              </Button>
+            </Popconfirm>
+          ) : (
+            <Button size="small" onClick={() => handleToggleActive(row, true)}>
+              启用
             </Button>
-          </Popconfirm>
-        ) : (
-          <Button size="small" onClick={() => handleToggleActive(row, true)}>
-            启用
+          )}
+          <Button size="small" onClick={() => setBindingApp(row)}>
+            绑定标签
           </Button>
-        ),
+        </Space>
+      ),
     },
   ];
 
@@ -200,6 +209,16 @@ export function AdminAppsPage() {
           </div>
         )}
       </Modal>
+
+      {bindingApp && (
+        <BindTagsModal
+          appId={bindingApp.dify_app_id}
+          appName={bindingApp.name}
+          open
+          onClose={() => setBindingApp(null)}
+          onSaved={refetch}
+        />
+      )}
     </div>
   );
 }
