@@ -32,6 +32,7 @@ import {
 } from "@/lib/api";
 import { useAdminTags } from "@/hooks/useAdminTags";
 import { BindAppsModal } from "@/pages/AdminTagsPage/BindAppsModal";
+import { BindUsersModal } from "@/pages/AdminTagsPage/BindUsersModal";
 
 export function AdminTagsPage() {
   const { data, isLoading, refetch } = useAdminTags();
@@ -39,6 +40,8 @@ export function AdminTagsPage() {
   const [editingTag, setEditingTag] = useState<AdminTagOut | null>(null);
   // TASK-PE-08: tag→apps binding modal target row.
   const [bindingTag, setBindingTag] = useState<AdminTagOut | null>(null);
+  // TASK-PE-09: tag→users binding modal target row.
+  const [bindingUsersTag, setBindingUsersTag] = useState<AdminTagOut | null>(null);
 
   // 守 PE-06 REWORK-PE-06-INDEP #5 — declared above ``columns`` so the
   // array's ``onConfirm`` reference is not relying on function hoisting.
@@ -87,6 +90,9 @@ export function AdminTagsPage() {
           </Button>
           <Button size="small" onClick={() => setBindingTag(row)}>
             绑定 App
+          </Button>
+          <Button size="small" onClick={() => setBindingUsersTag(row)}>
+            绑定用户
           </Button>
           <Popconfirm
             title="确认删除该标签？"
@@ -146,6 +152,16 @@ export function AdminTagsPage() {
           tagName={bindingTag.name}
           open
           onClose={() => setBindingTag(null)}
+          onSaved={refetch}
+        />
+      )}
+
+      {bindingUsersTag && (
+        <BindUsersModal
+          tagId={bindingUsersTag.id}
+          tagName={bindingUsersTag.name}
+          open
+          onClose={() => setBindingUsersTag(null)}
           onSaved={refetch}
         />
       )}

@@ -965,3 +965,62 @@ export async function importDsl(file: File): Promise<DslImportResult> {
   }
   return resp.json() as Promise<DslImportResult>;
 }
+
+// --- TASK-PE-09 — user ↔ tag binding (replace-all, both directions) ---------
+//
+// Reverse-roles mirror of PE-08's tag↔app binding above. user_ids + tag_ids
+// are both ``users.id`` / ``tags.id`` UUIDs (serialized as strings for the SPA
+// Transfer keys). PUT is replace-all: body lists the FULL desired set; []
+// clears. Error code 1016 = a listed id doesn't exist (404).
+
+export interface UserTagsOut {
+  user_id: string;
+  tag_ids: string[];
+}
+
+export interface TagUsersOut {
+  tag_id: string;
+  user_ids: string[];
+}
+
+export interface UserTagsReplaceResult {
+  user_id: string;
+  tag_count: number;
+}
+
+export interface TagUsersReplaceResult {
+  tag_id: string;
+  user_count: number;
+}
+
+// GET /api/v1/ncmu/admin/users/{user_id}/tags — current bound tag ids.
+export function getUserTags(userId: string): Promise<UserTagsOut> {
+  return api<UserTagsOut>(`/admin/users/${encodeURIComponent(userId)}/tags`);
+}
+
+// PUT /api/v1/ncmu/admin/users/{user_id}/tags — replace-all bound tags.
+export function replaceUserTags(
+  userId: string,
+  tagIds: string[],
+): Promise<UserTagsReplaceResult> {
+  return api<UserTagsReplaceResult>(
+    `/admin/users/${encodeURIComponent(userId)}/tags`,
+    { method: "PUT", body: JSON.stringify({ tag_ids: tagIds }) },
+  );
+}
+
+// GET /api/v1/ncmu/admin/tags/{tag_id}/users — current bound user ids.
+export function getTagUsers(tagId: string): Promise<TagUsersOut> {
+  return api<TagUsersOut>(`/admin/tags/${encodeURIComponent(tagId)}/users`);
+}
+
+// PUT /api/v1/ncmu/admin/tags/{tag_id}/users — replace-all bound users.
+export function replaceTagUsers(
+  tagId: string,
+  userIds: string[],
+): Promise<TagUsersReplaceResult> {
+  return api<TagUsersReplaceResult>(
+    `/admin/tags/${encodeURIComponent(tagId)}/users`,
+    { method: "PUT", body: JSON.stringify({ user_ids: userIds }) },
+  );
+}

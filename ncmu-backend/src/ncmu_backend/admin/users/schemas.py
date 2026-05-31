@@ -47,3 +47,34 @@ class UserListResponse(BaseModel):
     """Page envelope around ``UserOut`` items."""
     total: int
     items: list[UserOut]
+
+
+# --------------------------------------------------------------------- #
+# TASK-PE-09 — user ↔ tag binding (replace-all / reverse direction) schemas.
+# Mirror of PE-08's app↔tag binding schemas (admin/apps/schemas.py).
+# --------------------------------------------------------------------- #
+class UserBindTagsRequest(BaseModel):
+    """PUT /admin/users/{user_id}/tags body — replace-all set of bound tags.
+
+    ``tag_ids`` are ``tags.id`` UUIDs. ``[]`` clears all (idempotent
+    replace-all). Duplicates are de-duped server side. ``user_tags.tag_id``
+    FKs to ``tags.id``, so nonexistent ids are rejected (404 / 1016) before
+    insert rather than surfacing a raw IntegrityError.
+    """
+
+    tag_ids: list[uuid.UUID] = Field(default_factory=list)
+
+
+class UserTagsOut(BaseModel):
+    """GET /admin/users/{user_id}/tags — the user's currently-bound tag ids
+    (serialized as strings for the SPA Transfer keys)."""
+
+    user_id: str
+    tag_ids: list[str]
+
+
+class UserTagsReplaceResult(BaseModel):
+    """PUT /admin/users/{user_id}/tags echo — final distinct bound count."""
+
+    user_id: str
+    tag_count: int

@@ -44,16 +44,19 @@ from ncmu_backend.admin.tags.schemas import (
     TagAppsOut,
     TagAppsReplaceResult,
     TagBindAppsRequest,
+    TagBindUsersRequest,
     TagCreate,
     TagOut,
     TagUpdate,
+    TagUsersOut,
+    TagUsersReplaceResult,
 )
 from ncmu_backend.admin.tags.services import (
     get_tag_with_counts,
     list_tags_with_counts,
 )
 from ncmu_backend.auth.deps import CurrentUser, require_admin
-from ncmu_backend.db.models import AppTag, DifyApp, Tag
+from ncmu_backend.db.models import AppTag, DifyApp, Tag, User, UserTag
 from ncmu_backend.db.session import get_db
 
 router = APIRouter(tags=["admin-tags"])
@@ -278,3 +281,74 @@ async def replace_tag_apps(
         db.add(AppTag(dify_app_id=aid, tag_id=tag_id))
     await db.commit()
     return TagAppsReplaceResult(tag_id=str(tag_id), app_count=len(app_ids))
+
+
+def _user_binding_not_found(missing: list[str]) -> HTTPException:
+    # TASK-PE-09: 1016 — one or more user ids in a tag↔user replace-all body
+    # don't exist (shared code with admin/users/routes.py). ``user_tags.user_id``
+    # FKs to ``users.id``; validating up-front turns a would-be raw
+    # IntegrityError into a clean 404 for the SPA.
+    return HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail={"code": 1016, "message": f"user(s) not found: {', '.join(missing)}"},
+    )
+
+
+# ===================================================================== #
+# TASK-PE-09 — tag ↔ user binding (replace-all, reverse direction of
+# admin/users/routes.py's user→tags). Same ``user_tags`` join table.
+# ===================================================================== #
+@router.get(
+    "/api/v1/ncmu/admin/tags/{tag_id}/users",
+    response_model=TagUsersOut,
+    summary="List the user ids currently bound to this tag",
+)
+async def list_tag_users(
+    tag_id: UUID,
+    _: CurrentUser = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> TagUsersOut:
+    if await db.get(Tag, tag_id) is None:
+        raise _not_found(tag_id)
+    user_ids = (
+        await db.execute(select(UserTag.user_id).where(UserTag.tag_id == tag_id))
+    ).scalars().all()
+    return TagUsersOut(tag_id=str(tag_id), user_ids=[str(u) for u in user_ids])
+
+
+@router.put(
+    "/api/v1/ncmu/admin/tags/{tag_id}/users",
+    response_model=TagUsersReplaceResult,
+    summary="Replace-all: set the tag's bound users to exactly body.user_ids",
+)
+async def replace_tag_users(
+    tag_id: UUID,
+    body: TagBindUsersRequest,
+    _: CurrentUser = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> TagUsersReplaceResult:
+    """Reverse of admin/users/routes.py:replace_user_tags — delete the tag's
+    existing ``user_tags`` rows then insert one per (de-duped) user_id.
+
+    Idempotent; ``[]`` clears all. Validates every user_id exists in ``users``
+    first (1016) so the FK surfaces a clean 404 instead of a raw IntegrityError.
+    """
+    if await db.get(Tag, tag_id) is None:
+        raise _not_found(tag_id)
+
+    user_ids = list(dict.fromkeys(body.user_ids))
+    if user_ids:
+        existing = set(
+            (
+                await db.execute(select(User.id).where(User.id.in_(user_ids)))
+            ).scalars().all()
+        )
+        missing = [str(u) for u in user_ids if u not in existing]
+        if missing:
+            raise _user_binding_not_found(missing)
+
+    await db.execute(delete(UserTag).where(UserTag.tag_id == tag_id))
+    for uid in user_ids:
+        db.add(UserTag(user_id=uid, tag_id=tag_id))
+    await db.commit()
+    return TagUsersReplaceResult(tag_id=str(tag_id), user_count=len(user_ids))

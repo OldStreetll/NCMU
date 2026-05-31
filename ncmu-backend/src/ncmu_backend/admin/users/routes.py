@@ -25,20 +25,23 @@ from __future__ import annotations
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
-from sqlalchemy import func, or_, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ncmu_backend.admin.users.schemas import (
+    UserBindTagsRequest,
     UserCreate,
     UserListResponse,
     UserOut,
+    UserTagsOut,
+    UserTagsReplaceResult,
     UserUpdate,
 )
 from ncmu_backend.admin.users.services import to_user_out
 from ncmu_backend.auth.deps import CurrentUser, require_admin
 from ncmu_backend.config import Settings, get_settings
-from ncmu_backend.db.models import User
+from ncmu_backend.db.models import Tag, User, UserTag
 from ncmu_backend.db.session import get_db
 
 router = APIRouter(tags=["admin-users"])
@@ -176,3 +179,79 @@ async def deactivate_user(
     user.is_active = False
     await db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+def _binding_targets_not_found(kind: str, missing: list[str]) -> HTTPException:
+    # TASK-PE-09: 1016 — one or more ids in a user↔tag replace-all body do
+    # not exist (next free code after PE-08's 1015 app↔tag). ``user_tags``
+    # FKs both sides (users.id / tags.id, ondelete=CASCADE), so a phantom id
+    # would surface a raw IntegrityError; validating up-front gives the SPA a
+    # clean 404 (mirror of PE-08's _binding_targets_not_found 1015).
+    return HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail={"code": 1016, "message": f"{kind} not found: {', '.join(missing)}"},
+    )
+
+
+# ===================================================================== #
+# TASK-PE-09 — user ↔ tag binding (replace-all). Reverse direction lives
+# with the tag in admin/tags/routes.py (tag→users); same ``user_tags`` table.
+# Mirror of PE-08's app↔tag binding (admin/apps/routes.py).
+# ===================================================================== #
+@router.get(
+    "/api/v1/ncmu/admin/users/{user_id}/tags",
+    response_model=UserTagsOut,
+    summary="List the tag ids currently bound to this user",
+)
+async def list_user_tags(
+    user_id: UUID,
+    _: CurrentUser = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> UserTagsOut:
+    if await db.get(User, user_id) is None:
+        raise _not_found(user_id)
+    tag_ids = (
+        await db.execute(select(UserTag.tag_id).where(UserTag.user_id == user_id))
+    ).scalars().all()
+    return UserTagsOut(user_id=str(user_id), tag_ids=[str(t) for t in tag_ids])
+
+
+@router.put(
+    "/api/v1/ncmu/admin/users/{user_id}/tags",
+    response_model=UserTagsReplaceResult,
+    summary="Replace-all: set the user's bound tags to exactly body.tag_ids",
+)
+async def replace_user_tags(
+    user_id: UUID,
+    body: UserBindTagsRequest,
+    _: CurrentUser = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> UserTagsReplaceResult:
+    """Replace-all binding (TASK-PE-09): delete the user's existing
+    ``user_tags`` rows, then insert one per (de-duped) tag_id.
+
+    Idempotent — PUT the same body twice → identical final state. ``[]``
+    clears all bindings. Validates every tag_id exists in ``tags`` first
+    (1016) so the FK surfaces a clean 404 instead of a raw IntegrityError.
+    """
+    if await db.get(User, user_id) is None:
+        raise _not_found(user_id)
+
+    # De-dupe while preserving order; the composite PK (user_id, tag_id)
+    # would raise on a repeated pair within one body.
+    tag_ids = list(dict.fromkeys(body.tag_ids))
+    if tag_ids:
+        existing = set(
+            (
+                await db.execute(select(Tag.id).where(Tag.id.in_(tag_ids)))
+            ).scalars().all()
+        )
+        missing = [str(t) for t in tag_ids if t not in existing]
+        if missing:
+            raise _binding_targets_not_found("tag(s)", missing)
+
+    await db.execute(delete(UserTag).where(UserTag.user_id == user_id))
+    for tid in tag_ids:
+        db.add(UserTag(user_id=user_id, tag_id=tid))
+    await db.commit()
+    return UserTagsReplaceResult(user_id=str(user_id), tag_count=len(tag_ids))

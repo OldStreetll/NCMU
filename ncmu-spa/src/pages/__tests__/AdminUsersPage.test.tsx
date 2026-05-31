@@ -288,16 +288,65 @@ describe("AdminUsersPage — create flow", () => {
 });
 
 describe("AdminUsersPage — edit + deactivate", () => {
-  it("PATCHes name on save in edit modal", async () => {
-    fetchMock
-      .mockResolvedValueOnce(
-        jsonResponse(200, { total: 1, items: [USER_LISI] }),
-      )
-      .mockResolvedValueOnce(jsonResponse(200, { ...USER_LISI, name: "李四改" }))
-      .mockResolvedValueOnce(
-        jsonResponse(200, { total: 1, items: [{ ...USER_LISI, name: "李四改" }] }),
-      );
+  // TASK-PE-09 — opening the edit modal now also GETs the full tag list
+  // (useAdminTags → GET /admin/tags) + the user's bound tags
+  // (GET /admin/users/{id}/tags) to populate the inline tags Transfer. The
+  // save-path tests therefore route fetches by URL (instead of brittle
+  // mockResolvedValueOnce sequences) and find the PATCH by exact URL+method.
+  const TAG_TECH = {
+    id: "33333333-3333-4000-8000-000000000001",
+    name: "技术",
+    description: null,
+    app_count: 0,
+    user_count: 0,
+  };
+  const TAG_HR = {
+    id: "33333333-3333-4000-8000-000000000002",
+    name: "人事",
+    description: null,
+    app_count: 0,
+    user_count: 0,
+  };
 
+  function routeEdit(opts?: { boundTagIds?: string[]; patchResponse?: unknown }) {
+    const boundTagIds = opts?.boundTagIds ?? [];
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+      const u = String(url);
+      const method = (init?.method ?? "GET").toUpperCase();
+      // useAdminTags — GET /admin/tags (NOT the /admin/users/{id}/tags route)
+      if (u.includes("/admin/tags") && !u.includes("/users")) {
+        return Promise.resolve(jsonResponse(200, [TAG_TECH, TAG_HR]));
+      }
+      // GET / PUT /admin/users/{id}/tags (user↔tag binding)
+      if (/\/admin\/users\/[^/]+\/tags(\?|$)/.test(u)) {
+        return Promise.resolve(
+          jsonResponse(200, { user_id: USER_LISI.id, tag_ids: boundTagIds }),
+        );
+      }
+      // PATCH /admin/users/{id}
+      if (method === "PATCH" && /\/admin\/users\/[^/]+$/.test(u)) {
+        return Promise.resolve(
+          jsonResponse(200, opts?.patchResponse ?? { ...USER_LISI, name: "李四改" }),
+        );
+      }
+      // GET /admin/users (list + refetch)
+      if (u.includes("/admin/users")) {
+        return Promise.resolve(jsonResponse(200, { total: 1, items: [USER_LISI] }));
+      }
+      return Promise.resolve(jsonResponse(200, {}));
+    });
+  }
+
+  function findPatchCall() {
+    return fetchMock.mock.calls.find(
+      (c) =>
+        String(c[0]) === `/api/v1/ncmu/admin/users/${USER_LISI.id}` &&
+        (c[1] as RequestInit)?.method === "PATCH",
+    );
+  }
+
+  it("PATCHes name on save in edit modal", async () => {
+    routeEdit();
     renderPage();
     await screen.findByText("李四");
 
@@ -308,11 +357,8 @@ describe("AdminUsersPage — edit + deactivate", () => {
     typeInto(nameInput, "李四改");
     fireEvent.click(within(modal).getByRole("button", { name: /保\s*存/ }));
 
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
-    const patchCall = fetchMock.mock.calls[1];
-    expect(String(patchCall[0])).toBe(
-      `/api/v1/ncmu/admin/users/${USER_LISI.id}`,
-    );
+    await waitFor(() => expect(findPatchCall()).toBeTruthy());
+    const patchCall = findPatchCall()!;
     expect((patchCall[1] as RequestInit).method).toBe("PATCH");
     const body = JSON.parse((patchCall[1] as RequestInit).body as string);
     expect(body.name).toBe("李四改");
@@ -322,15 +368,8 @@ describe("AdminUsersPage — edit + deactivate", () => {
     // REWORK-PE-06-INDEP #4 — editing only name must yield a PATCH body
     // containing solely { name: ... }; dingtalk_userid / dept_path /
     // is_active stay out of the wire request because they didn't change.
-    fetchMock
-      .mockResolvedValueOnce(
-        jsonResponse(200, { total: 1, items: [USER_LISI] }),
-      )
-      .mockResolvedValueOnce(jsonResponse(200, { ...USER_LISI, name: "李四改" }))
-      .mockResolvedValueOnce(
-        jsonResponse(200, { total: 1, items: [{ ...USER_LISI, name: "李四改" }] }),
-      );
-
+    // PE-09: tags also unchanged ([] == []) → no replace-all PUT fires.
+    routeEdit();
     renderPage();
     await screen.findByText("李四");
 
@@ -340,15 +379,21 @@ describe("AdminUsersPage — edit + deactivate", () => {
     typeInto(nameInput, "李四改");
     fireEvent.click(within(modal).getByRole("button", { name: /保\s*存/ }));
 
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
-    const patchCall = fetchMock.mock.calls[1];
-    const body = JSON.parse((patchCall[1] as RequestInit).body as string);
+    await waitFor(() => expect(findPatchCall()).toBeTruthy());
+    const body = JSON.parse((findPatchCall()![1] as RequestInit).body as string);
     // Field-level assertion (not toMatchObject): exactly one key, only name.
     expect(Object.keys(body).sort()).toEqual(["name"]);
     expect(body.name).toBe("李四改");
     expect(body).not.toHaveProperty("dingtalk_userid");
     expect(body).not.toHaveProperty("dept_path");
     expect(body).not.toHaveProperty("is_active");
+    // tags unchanged → no PUT /admin/users/{id}/tags fired.
+    const tagPut = fetchMock.mock.calls.find(
+      (c) =>
+        String(c[0]) === `/api/v1/ncmu/admin/users/${USER_LISI.id}/tags` &&
+        (c[1] as RequestInit)?.method === "PUT",
+    );
+    expect(tagPut).toBeFalsy();
   });
 
   // REWORK-PE-06-INDEP-2 #2 — parameterized coverage for the other three
@@ -374,14 +419,7 @@ describe("AdminUsersPage — edit + deactivate", () => {
   ])(
     "PATCH excludes unchanged fields when only $label is edited",
     async ({ label, newValue, expectedBody }) => {
-      fetchMock
-        .mockResolvedValueOnce(
-          jsonResponse(200, { total: 1, items: [USER_LISI] }),
-        )
-        .mockResolvedValueOnce(jsonResponse(200, USER_LISI))
-        .mockResolvedValueOnce(
-          jsonResponse(200, { total: 1, items: [USER_LISI] }),
-        );
+      routeEdit({ patchResponse: USER_LISI });
 
       renderPage();
       await screen.findByText("李四");
@@ -390,8 +428,9 @@ describe("AdminUsersPage — edit + deactivate", () => {
       const modal = await screen.findByRole("dialog");
 
       if (label === "is_active") {
-        // Modal hosts a single Switch (status); top-toolbar "显示已停用"
-        // is outside the modal so within(modal) scope keeps us correct.
+        // The status Switch is the ONLY switch inside the modal (top-toolbar
+        // "显示已停用" is outside; the PE-09 tags Transfer uses checkboxes,
+        // not switches), so within(modal).getByRole("switch") stays singular.
         const switchEl = within(modal).getByRole("switch");
         fireEvent.click(switchEl);
       } else {
@@ -405,13 +444,8 @@ describe("AdminUsersPage — edit + deactivate", () => {
       }
       fireEvent.click(within(modal).getByRole("button", { name: /保\s*存/ }));
 
-      await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
-      const patchCall = fetchMock.mock.calls[1];
-      expect(String(patchCall[0])).toBe(
-        `/api/v1/ncmu/admin/users/${USER_LISI.id}`,
-      );
-      expect((patchCall[1] as RequestInit).method).toBe("PATCH");
-      const body = JSON.parse((patchCall[1] as RequestInit).body as string);
+      await waitFor(() => expect(findPatchCall()).toBeTruthy());
+      const body = JSON.parse((findPatchCall()![1] as RequestInit).body as string);
       // Exactly one key — sole field changed (守 SOP 字段级 assert).
       expect(Object.keys(body).sort()).toEqual(Object.keys(expectedBody));
       expect(body).toEqual(expectedBody);
@@ -424,10 +458,28 @@ describe("AdminUsersPage — edit + deactivate", () => {
     },
   );
 
-  it("copy UUID button calls navigator.clipboard.writeText", async () => {
-    fetchMock.mockResolvedValueOnce(
-      jsonResponse(200, { total: 1, items: [USER_LISI] }),
+  it("edit modal loads the user's bound tags into the inline Transfer (PE-09)", async () => {
+    routeEdit({ boundTagIds: [TAG_TECH.id] });
+    renderPage();
+    await screen.findByText("李四");
+
+    fireEvent.click(screen.getByRole("button", { name: /编\s*辑/ }));
+    const modal = await screen.findByRole("dialog");
+    // Both tags render as Transfer items (left "可选标签" + right "已绑定").
+    expect(await within(modal).findByText("技术")).toBeInTheDocument();
+    expect(within(modal).getByText("人事")).toBeInTheDocument();
+    // The GET for the user's current tag bindings was issued on open.
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.some(
+          (c) => String(c[0]) === `/api/v1/ncmu/admin/users/${USER_LISI.id}/tags`,
+        ),
+      ).toBe(true),
     );
+  });
+
+  it("copy UUID button calls navigator.clipboard.writeText", async () => {
+    routeEdit();
     renderPage();
     await screen.findByText("李四");
     fireEvent.click(screen.getByRole("button", { name: /编\s*辑/ }));

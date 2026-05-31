@@ -92,3 +92,33 @@ class TagAppsReplaceResult(BaseModel):
 
     tag_id: str
     app_count: int
+
+
+# --------------------------------------------------------------------- #
+# TASK-PE-09 — tag ↔ user binding (replace-all) schemas. Reverse of
+# admin/users/schemas.py's user→tags; same ``user_tags`` join table.
+# --------------------------------------------------------------------- #
+class TagBindUsersRequest(BaseModel):
+    """PUT /admin/tags/{tag_id}/users body — replace-all set of bound users.
+
+    ``user_ids`` are ``users.id`` UUIDs. ``[]`` clears all bindings for the
+    tag (idempotent replace-all). Duplicate ids are de-duped server side (the
+    ``user_tags`` composite PK would otherwise raise on a repeated pair).
+    """
+
+    user_ids: list[uuid.UUID] = Field(default_factory=list)
+
+
+class TagUsersOut(BaseModel):
+    """GET /admin/tags/{tag_id}/users — the tag's currently-bound user ids
+    (serialized as strings for the SPA Transfer keys)."""
+
+    tag_id: str
+    user_ids: list[str]
+
+
+class TagUsersReplaceResult(BaseModel):
+    """PUT /admin/tags/{tag_id}/users echo — final distinct bound count."""
+
+    tag_id: str
+    user_count: int

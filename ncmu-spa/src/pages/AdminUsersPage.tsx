@@ -7,10 +7,10 @@
 // + 如需提为 admin 需手动编辑 .env NCMU_ADMIN_USER_IDS（plan §3 PE-06 Step 3
 // 字面）.
 //
-// Tags 编辑 (PE-09 时落地) 占位为禁用 Transfer，避免与 backend tag_ids 字段
-// 解耦留陷阱 — 当前后端忽略 tag_ids，前端先不发.
+// Tags 编辑 (PE-09 落地) — 编辑 modal 内联 Transfer，保存时调 replaceUserTags
+// 真发 tag_ids 到后端 PUT /admin/users/{id}/tags (replace-all).
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Alert,
   Button,
@@ -24,6 +24,7 @@ import {
   Table,
   Tag,
   Tooltip,
+  Transfer,
   Typography,
 } from "antd";
 import { CopyOutlined } from "@ant-design/icons";
@@ -35,9 +36,12 @@ import {
   type AdminUserUpdateBody,
   createAdminUser,
   deactivateAdminUser,
+  getUserTags,
+  replaceUserTags,
   updateAdminUser,
 } from "@/lib/api";
 import { useAdminUsers } from "@/hooks/useAdminUsers";
+import { useAdminTags } from "@/hooks/useAdminTags";
 
 const DEFAULT_PAGE_SIZE = 50;
 
@@ -301,6 +305,13 @@ function EditUserModal({ user, onClose, onSaved }: EditUserModalProps) {
   const [form] = Form.useForm<AdminUserUpdateBody>();
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  // TASK-PE-09 — user↔tag binding (many-to-many) edited inline via a Transfer
+  // in this modal (plan §1127 "PE-09 时 enable"). The tag-side mirror is the
+  // separate AdminTagsPage/BindUsersModal.
+  const { data: allTags = [] } = useAdminTags();
+  const [tagKeys, setTagKeys] = useState<string[]>([]);
+  const [origTagKeys, setOrigTagKeys] = useState<string[]>([]);
+  const [tagsLoading, setTagsLoading] = useState(false);
 
   // Initial values mirror the row so the test can read the prefilled name.
   const initial: AdminUserUpdateBody = {
@@ -309,6 +320,29 @@ function EditUserModal({ user, onClose, onSaved }: EditUserModalProps) {
     dept_path: user.dept_path ?? "",
     is_active: user.is_active,
   };
+
+  // Load the user's current tag bindings when the modal opens (it mounts
+  // fresh per edit, so this fires once). On failure we keep ``tagsLoading``
+  // true so the disabled Transfer can't be saved as an empty set (which the
+  // replace-all PUT would interpret as "clear all tags").
+  useEffect(() => {
+    let cancelled = false;
+    setTagsLoading(true);
+    getUserTags(user.id)
+      .then((res) => {
+        if (cancelled) return;
+        setTagKeys(res.tag_ids);
+        setOrigTagKeys(res.tag_ids);
+        setTagsLoading(false);
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        message.error(formatError(err));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [user.id]);
 
   async function handleSubmit() {
     setSubmitError(null);
@@ -335,7 +369,14 @@ function EditUserModal({ user, onClose, onSaved }: EditUserModalProps) {
     if (dp !== (user.dept_path || null)) patch.dept_path = dp;
     if (values.is_active !== user.is_active) patch.is_active = values.is_active;
 
-    if (Object.keys(patch).length === 0) {
+    // TASK-PE-09 — tags are a sibling many-to-many edit; compare the
+    // Transfer's current right-column set against what we loaded on open
+    // (order-independent) so an unchanged tag set doesn't fire a PUT.
+    const tagsChanged =
+      tagKeys.length !== origTagKeys.length ||
+      [...tagKeys].sort().join() !== [...origTagKeys].sort().join();
+
+    if (Object.keys(patch).length === 0 && !tagsChanged) {
       message.info("无变更");
       onClose();
       return;
@@ -343,7 +384,12 @@ function EditUserModal({ user, onClose, onSaved }: EditUserModalProps) {
 
     setSubmitting(true);
     try {
-      await updateAdminUser(user.id, patch);
+      if (Object.keys(patch).length > 0) {
+        await updateAdminUser(user.id, patch);
+      }
+      if (tagsChanged) {
+        await replaceUserTags(user.id, tagKeys);
+      }
       message.success(`已保存：${values.name ?? user.name}`);
       onSaved();
     } catch (err) {
@@ -408,9 +454,16 @@ function EditUserModal({ user, onClose, onSaved }: EditUserModalProps) {
           <Switch checkedChildren="启用" unCheckedChildren="停用" />
         </Form.Item>
         <Form.Item label="标签">
-          <Typography.Text type="secondary">
-            标签多对多绑定 PE-09 时上线，本批次禁用。
-          </Typography.Text>
+          <Transfer<{ key: string; title: string }>
+            dataSource={allTags.map((t) => ({ key: t.id, title: t.name }))}
+            targetKeys={tagKeys}
+            onChange={(keys) => setTagKeys(keys.map(String))}
+            render={(item) => item.title}
+            showSearch
+            listStyle={{ width: 220, height: 280 }}
+            titles={["可选标签", "已绑定"]}
+            disabled={tagsLoading}
+          />
         </Form.Item>
       </Form>
     </Modal>
