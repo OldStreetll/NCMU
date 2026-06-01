@@ -21,6 +21,8 @@ EXPECTED_TABLES = {
     "tags",
     "app_tags",
     "user_tags",
+    # 0011 Phase 2D-A2-同步 TASK-2DA2S-02 钉钉部门→tag 映射表
+    "department_tag_mappings",
     "alembic_version",
 }
 
@@ -55,15 +57,17 @@ def test_upgrade_head_creates_all_expected_tables(db_session):
         f"预期表 {EXPECTED_TABLES} 未全部创建；实际：{sorted(rows)}"
     )
 
-    # 再断言 alembic_version 有 0008（最新 head — REWORK-PC2-FIX-C1
-    # 加 alter dify_external_kb_configs.external_kb_name VARCHAR(64)→VARCHAR(200)；
+    # 再断言 alembic_version 为最新 head：
+    # 0011 Phase 2D-A2-同步 TASK-2DA2S-02 department_tag_mappings；
+    # 0010 Phase 2E TASK-PE-07 dify_apps.is_active + last_synced_at；
+    # 0009 Phase 2E PE-05 tags/app_tags/user_tags 三表；
     # 0007 是 Phase 2C TASK-PC1 app_owners + personal_kb_applications + ...files；
     # 0006 是 TASK-79-BACKEND-ARCH-FIX dify_apps.api_token；0005 是 Phase 2B
-    # TASK-67b workflow_runs + dify_apps.mode）
+    # TASK-67b workflow_runs + dify_apps.mode。
     version = db_session.execute(
         text("SELECT version_num FROM alembic_version")
     ).scalar_one()
-    assert version == "0009", f"预期 alembic_version=0009，实际 {version}"
+    assert version == "0011", f"预期 alembic_version=0011，实际 {version}"
 
     # IMP-INDEP-4: 显式列级断言 — 0006 migration 的核心交付物是
     # dify_apps.api_token VARCHAR(64) NULL。版本号匹配不保证列真被加
@@ -96,6 +100,8 @@ def test_downgrade_base_drops_all_business_tables(test_db_url):
         "tags",
         "app_tags",
         "user_tags",
+        # 0011 Phase 2D-A2-同步 — downgrade() 必须 drop（回归保护）
+        "department_tag_mappings",
     }
     assert tables.isdisjoint(business_tables), (
         f"downgrade 后残留业务表：{tables & business_tables}"

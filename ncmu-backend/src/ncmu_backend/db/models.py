@@ -392,3 +392,30 @@ class UserTag(Base):
         ForeignKey("tags.id", ondelete="CASCADE"),
         primary_key=True,
     )
+
+
+class DepartmentTagMapping(Base):
+    """DingTalk department ↔ Tag mapping (Phase 2D-A2-同步 TASK-2DA2S-02).
+
+    Maps a DingTalk department id (``dept_id``) to an NCMU tag. The sync
+    service (T03) seeds rows manually then reads this table to decide which
+    ``user_tags`` to write for each employee under the synced department
+    subtree. Composite PK lets one department map to many tags while
+    de-duplicating the same (dept_id, tag_id) pair.
+
+    Mirrors ``AppTag`` / ``UserTag`` composite-PK + FK CASCADE 范式:
+    deleting a tag cascade-deletes its mappings. ``dept_id`` carries no FK
+    — it is a DingTalk-side id and NCMU has no ``departments`` table.
+    """
+
+    __tablename__ = "department_tag_mappings"
+
+    dept_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    tag_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("tags.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
