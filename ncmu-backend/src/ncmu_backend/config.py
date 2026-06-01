@@ -128,6 +128,29 @@ class Settings(BaseSettings):
         validation_alias="PERSONAL_KB_STORAGE_ROOT",
     )
 
+    # --- Phase 2D-A2 DingTalk 通讯录同步 (TASK-2DA2S-01) -------------
+    # 钉钉企业内部应用凭据 + oapi 基址。app_key/secret/corp_id 默认
+    # CHANGE_ME（对齐 DIFY_CONSOLE_API_KEY 占位范式）——真值由 .env 注入；
+    # 本批仅 client 封装 + respx mock 测，不依赖真凭据。oapi_base 可指向
+    # 测试 stub。dingtalk_app_secret 加入 SENSITIVE_KEYS 之外（同步半属
+    # admin-触发后台能力，prod 校验在 2D-A2 收口时统一加）。
+    dingtalk_app_key: str = Field(
+        default="CHANGE_ME",
+        validation_alias="DINGTALK_APP_KEY",
+    )
+    dingtalk_app_secret: str = Field(
+        default="CHANGE_ME",
+        validation_alias="DINGTALK_APP_SECRET",
+    )
+    dingtalk_corp_id: str = Field(
+        default="CHANGE_ME",
+        validation_alias="DINGTALK_CORP_ID",
+    )
+    dingtalk_oapi_base: str = Field(
+        default="https://oapi.dingtalk.com",
+        validation_alias="DINGTALK_OAPI_BASE",
+    )
+
     @property
     def admin_user_id_set(self) -> set[str]:
         """Parsed NCMU_ADMIN_USER_IDS as a set, lower-cased."""
