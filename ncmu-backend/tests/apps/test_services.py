@@ -520,6 +520,244 @@ async def test_owner_sql_explain_uses_dify_apps_no_cast(async_db):
     )
 
 
+# ── TASK-2D-A1 — flag-ON tag routing (user_tags ∩ app_tags) ─────────────────
+# spec §3 / §6 #1: flag ON → shared = shared_raw 中 dify_app_id 落在
+# 「该 user 的 user_tags 与该 app 的 app_tags 有交集」的 App (含 [KB]，
+# 统一标签控制，不再走 detect_app_type 名字过滤) ∪ owned。merge/dedupe/
+# order 与 flag-OFF 现状一致 (shared 先 / owner 后 / shared 优先)。
+# flag OFF 行为不变 (上面 7 case 已覆盖 [KB] 名字过滤 / 本批不动)。
+
+
+async def _seed_tag(async_db, *, name: str) -> str:
+    """Insert one tag (server_default gen_random_uuid()), return its id (str)."""
+    row = (await async_db.execute(text(
+        "INSERT INTO tags (name) VALUES (:name) RETURNING id"
+    ), {"name": name})).first()
+    await async_db.commit()
+    return str(row.id)
+
+
+async def _bind_user_tag(async_db, *, user_uuid: str, tag_id: str) -> None:
+    await async_db.execute(text(
+        "INSERT INTO user_tags (user_id, tag_id) VALUES (:u, :t)"
+    ), {"u": user_uuid, "t": tag_id})
+    await async_db.commit()
+
+
+async def _bind_app_tag(async_db, *, app_id: str, tag_id: str) -> None:
+    await async_db.execute(text(
+        "INSERT INTO app_tags (dify_app_id, tag_id) VALUES (:a, :t)"
+    ), {"a": app_id, "t": tag_id})
+    await async_db.commit()
+
+
+def _routing_on(settings) -> Settings:
+    """Copy test settings with the routing flag flipped ON — NEVER touches
+    prod default (config.py:110 stays False). spec §3 flag 策略 / AC#3."""
+    return settings.model_copy(update={"tags_routing_enabled": True})
+
+
+async def test_flag_on_shared_filtered_by_tag_intersection(
+    async_db, http_client, fresh_cache, test_settings,
+):
+    """flag ON：仅 user_tags ∩ app_tags 非空的共享 App 可见 / 未匹配不可见 /
+    过滤靠标签不靠名字 (3 个都是非-[KB] 名字)。"""
+    from ncmu_backend.apps import services
+    t_hr = await _seed_tag(async_db, name="HR")
+    t_fin = await _seed_tag(async_db, name="Finance")
+    await _bind_user_tag(async_db, user_uuid=ZHANGSAN_UUID, tag_id=t_hr)
+    # shared-1 bound HR (user has HR) → visible
+    await _bind_app_tag(async_db, app_id="shared-1", tag_id=t_hr)
+    # shared-2 bound Finance (user lacks) → not visible
+    await _bind_app_tag(async_db, app_id="shared-2", tag_id=t_fin)
+    # shared-3 no tags → not visible
+    with respx.mock(assert_all_called=True) as rx:
+        rx.get(url__regex=r".*/console/api/apps.*").mock(
+            return_value=Response(200, json={
+                "data": [
+                    {"id": "shared-1", "name": "营销助手", "mode": "chat"},
+                    {"id": "shared-2", "name": "财务报表", "mode": "chat"},
+                    {"id": "shared-3", "name": "通用问答", "mode": "chat"},
+                ],
+            })
+        )
+        out = await services.list_apps_for_user(
+            db=async_db,
+            user_id=ZHANGSAN_UUID,
+            http=http_client,
+            cache=fresh_cache,
+            settings=_routing_on(test_settings),
+        )
+    assert {a["id"] for a in out} == {"shared-1"}, (
+        f"flag ON should surface only user_tag ∩ app_tag match; got {out}"
+    )
+
+
+async def test_flag_on_kb_app_also_tag_filtered(
+    async_db, http_client, fresh_cache, test_settings,
+):
+    """flag ON：[KB] 名 App 不开特例——无匹配 tag 则不可见；非-[KB] 名 App
+    有匹配 tag 则可见。证明统一标签控制 (spec §2 决策 / §3)。"""
+    from ncmu_backend.apps import services
+    t_hr = await _seed_tag(async_db, name="HR")
+    await _bind_user_tag(async_db, user_uuid=ZHANGSAN_UUID, tag_id=t_hr)
+    # [KB]-named app but NO matching tag → must be hidden (no name 特例)
+    # non-[KB] app WITH matching tag → visible
+    await _bind_app_tag(async_db, app_id="plain-with-tag", tag_id=t_hr)
+    with respx.mock(assert_all_called=True) as rx:
+        rx.get(url__regex=r".*/console/api/apps.*").mock(
+            return_value=Response(200, json={
+                "data": [
+                    {"id": "kb-no-tag", "name": "[KB]员工手册", "mode": "chat"},
+                    {"id": "plain-with-tag", "name": "营销助手", "mode": "chat"},
+                ],
+            })
+        )
+        out = await services.list_apps_for_user(
+            db=async_db,
+            user_id=ZHANGSAN_UUID,
+            http=http_client,
+            cache=fresh_cache,
+            settings=_routing_on(test_settings),
+        )
+    ids = {a["id"] for a in out}
+    assert "kb-no-tag" not in ids, (
+        "[KB] name must NOT bypass tag filter under flag ON (统一标签控制)"
+    )
+    assert ids == {"plain-with-tag"}, f"expected only tag-matched app; got {out}"
+
+
+async def test_flag_on_owned_path_unaffected(
+    async_db, http_client, fresh_cache, test_settings,
+):
+    """flag ON：owner 路径不受 flag 影响 (private owner_only App 照常返回，
+    即使 user 无任何 tag 匹配)。spec §3 / AC#2 owned 不受 flag 影响。"""
+    from ncmu_backend.apps import services
+    # user has NO tags; owner has a private app
+    await _seed_tag(async_db, name="Finance")  # exists but unbound to张三
+    await _seed_owner(async_db, app_id="my-private", owner_uuid=ZHANGSAN_UUID,
+                      name="私有助手")
+    with respx.mock(assert_all_called=True) as rx:
+        rx.get(url__regex=r".*/console/api/apps.*").mock(
+            return_value=Response(200, json={
+                "data": [{"id": "shared-x", "name": "[KB]A", "mode": "chat"}],
+            })
+        )
+        out = await services.list_apps_for_user(
+            db=async_db,
+            user_id=ZHANGSAN_UUID,
+            http=http_client,
+            cache=fresh_cache,
+            settings=_routing_on(test_settings),
+        )
+    ids = {a["id"] for a in out}
+    assert "my-private" in ids, "owner_only App must surface regardless of flag/tags"
+    assert "shared-x" not in ids, "shared App without matching tag hidden under ON"
+    assert ids == {"my-private"}
+
+
+async def test_flag_on_dedupe_and_order_preserved(
+    async_db, http_client, fresh_cache, test_settings,
+):
+    """flag ON：dedupe by id + 顺序 (shared 先 / owner 后 / shared 优先)
+    与 flag-OFF 现状一致。"""
+    from ncmu_backend.apps import services
+    t_hr = await _seed_tag(async_db, name="HR")
+    await _bind_user_tag(async_db, user_uuid=ZHANGSAN_UUID, tag_id=t_hr)
+    await _bind_app_tag(async_db, app_id="dup-app", tag_id=t_hr)
+    await _bind_app_tag(async_db, app_id="shared-match", tag_id=t_hr)
+    # owner also owns dup-app (collision) + an owner-only app
+    await _seed_owner(async_db, app_id="dup-app", owner_uuid=ZHANGSAN_UUID,
+                      name="owner-name", mode="advanced-chat")
+    await _seed_owner(async_db, app_id="owner-only", owner_uuid=ZHANGSAN_UUID,
+                      name="私有")
+    with respx.mock(assert_all_called=True) as rx:
+        rx.get(url__regex=r".*/console/api/apps.*").mock(
+            return_value=Response(200, json={
+                "data": [
+                    {"id": "shared-match", "name": "营销", "mode": "chat"},
+                    {"id": "dup-app", "name": "shared-dup-name", "mode": "chat"},
+                ],
+            })
+        )
+        out = await services.list_apps_for_user(
+            db=async_db,
+            user_id=ZHANGSAN_UUID,
+            http=http_client,
+            cache=fresh_cache,
+            settings=_routing_on(test_settings),
+        )
+    ids = [a["id"] for a in out]
+    assert ids == ["shared-match", "dup-app", "owner-only"], (
+        f"order must be shared-first then owner; got {ids}"
+    )
+    assert len(ids) == len(set(ids)), f"duplicates: {ids}"
+    # shared entry wins dedupe (source of truth) — same rule as flag-OFF
+    dup = next(a for a in out if a["id"] == "dup-app")
+    assert dup["name"] == "shared-dup-name", "shared entry should win dedupe"
+
+
+async def test_flag_on_empty_user_tags_hides_all_shared(
+    async_db, http_client, fresh_cache, test_settings,
+):
+    """flag ON + user 无任何 tag → 共享全隐 (restrictive 空集短路)。
+    锁 REWORK Minor #1a：空 user_tag_ids 直接 shared=[]，即便 App 已打标签。"""
+    from ncmu_backend.apps import services
+    # An app IS tagged, but the user has NO tags at all.
+    t_hr = await _seed_tag(async_db, name="HR")
+    await _bind_app_tag(async_db, app_id="tagged-app", tag_id=t_hr)
+    with respx.mock(assert_all_called=True) as rx:
+        rx.get(url__regex=r".*/console/api/apps.*").mock(
+            return_value=Response(200, json={
+                "data": [
+                    {"id": "tagged-app", "name": "营销助手", "mode": "chat"},
+                    {"id": "kb-app", "name": "[KB]手册", "mode": "chat"},
+                ],
+            })
+        )
+        out = await services.list_apps_for_user(
+            db=async_db,
+            user_id=ZHANGSAN_UUID,
+            http=http_client,
+            cache=fresh_cache,
+            settings=_routing_on(test_settings),
+        )
+    assert out == [], (
+        "user with no tags must see zero shared apps under flag ON (restrictive)"
+    )
+
+
+async def test_flag_off_ignores_tags_keeps_kb_name_filter(
+    async_db, http_client, fresh_cache, test_settings,
+):
+    """flag OFF (prod 现状)：完全忽略 tag 表，仍走 [KB] 名字过滤。
+    证明 ON 分支不泄漏到 OFF 路径 (AC#1 prod 零回归 sentinel)。"""
+    from ncmu_backend.apps import services
+    t_hr = await _seed_tag(async_db, name="HR")
+    await _bind_user_tag(async_db, user_uuid=ZHANGSAN_UUID, tag_id=t_hr)
+    # non-[KB] app WITH matching tag — under OFF this must STILL be hidden
+    await _bind_app_tag(async_db, app_id="tagged-plain", tag_id=t_hr)
+    with respx.mock(assert_all_called=True) as rx:
+        rx.get(url__regex=r".*/console/api/apps.*").mock(
+            return_value=Response(200, json={
+                "data": [
+                    {"id": "tagged-plain", "name": "营销助手", "mode": "chat"},
+                    {"id": "kb-app", "name": "[KB]手册", "mode": "chat"},
+                ],
+            })
+        )
+        out = await services.list_apps_for_user(
+            db=async_db,
+            user_id=ZHANGSAN_UUID,
+            http=http_client,
+            cache=fresh_cache,
+            settings=test_settings,  # flag OFF (default False)
+        )
+    assert {a["id"] for a in out} == {"kb-app"}, (
+        "flag OFF must keep [KB] name filter and ignore tags entirely"
+    )
+
+
 async def test_owner_sql_perf_baseline_under_30ms(async_db):
     """plan AC#9 — owner SQL ≤ 30ms with 100 owned apps (pgbench-style)."""
     # Seed 100 owned apps for 张三 + matching dify_apps rows

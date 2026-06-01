@@ -103,7 +103,7 @@ class Settings(BaseSettings):
     # --- Phase 2C Personal KB (TASK-PC2-D) -------------------------
     # tags_routing_enabled: feature flag for the shared-App tag-based
     # routing path. **永久 false 直到钉钉接入** — only after DingTalk
-    # login backfills users.tags + tag_app_mappings does the
+    # login backfills user_tags + app_tags does the
     # shared-App route consult those tables (spec §1.5 调和 #4 / Q9-A
     # startup-read semantics, no dynamic flip; rotation requires
     # restarting ncmu-backend).

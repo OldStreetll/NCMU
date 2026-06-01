@@ -9,9 +9,15 @@ Paradigm shift（spec §3.3 / plan §4.4 PC2-C 字面 / C-INDEP-1 真代码 grou
 - union + dedupe by app_id (防御 / owner App 不应被 Dify Console 返回，
   但 owner App 出现在 Dify Console 时以 shared 条目为准 / 顺序 shared 先 owner 后)
 
-Feature flag `tags_routing_enabled` 由 PC2-D 引入；本模块不消费此 flag
-（spec §1.5 调和 #4 / 永久 false 直到钉钉接入 / 当前态 shared 路径走
-DifyConsoleClient real-time 不依赖 DB 表）。
+Feature flag `tags_routing_enabled` 由 PC2-D 引入 / 2D-A1 通电
+（spec 2026-06-01 phase2d §3 / §6 #1）：
+- flag OFF（prod 现状 / config.py:110 default False / 本批不翻）：shared 路径
+  走 DifyConsoleClient real-time + `detect_app_type` 的 [KB] 名字过滤 ∪ owned。
+  **prod 行为零变化**（DB tag 表完全不消费）。
+- flag ON（2D-A1 新增 / 暂不上 prod / 仅测试 env 验）：shared 路径改为
+  `user_tags ∩ app_tags` 交集匹配过滤（含 [KB]，统一标签控制，不再走名字
+  特例）∪ owned。merge/dedupe/order 与 OFF 现状一致。翻 flag 需等 2D-A2
+  同步全员标签 + 全 App 打标签后单独执行。
 """
 from __future__ import annotations
 
@@ -27,7 +33,7 @@ from ncmu_backend.apps.dify_console_client import (
     detect_app_type,
 )
 from ncmu_backend.config import Settings
-from ncmu_backend.db.models import AppOwner, DifyApp
+from ncmu_backend.db.models import AppOwner, AppTag, DifyApp, UserTag
 
 
 async def query_owned_apps(
@@ -75,6 +81,46 @@ async def query_owned_apps(
     ]
 
 
+async def query_user_tag_ids(
+    db: AsyncSession, user_id: UUID,
+) -> set[UUID]:
+    """TASK-2D-A1 — 该 user 绑定的 tag_id 集合（user_tags / PE-09 表）。
+
+        SELECT tag_id FROM user_tags WHERE user_id = :uid
+
+    返回 set 供 flag-ON 路径做 `user_tags ∩ app_tags` 交集判定。空集表示
+    该 user 未打任何标签（flag ON 下其共享 App 全不可见 / restrictive 语义）。
+    与 query_owned_apps 同风格：db 首位置参 + ORM select + async execute。
+    """
+    stmt = select(UserTag.tag_id).where(UserTag.user_id == user_id)
+    result = await db.execute(stmt)
+    return {row.tag_id for row in result}
+
+
+async def query_app_ids_matching_tags(
+    db: AsyncSession, user_tag_ids: set[UUID],
+) -> set[str]:
+    """TASK-2D-A1 — 与给定 tag_id 集合有交集的 dify_app_id 集合（app_tags / PE-08 表）。
+
+        SELECT DISTINCT dify_app_id FROM app_tags WHERE tag_id = ANY(:tag_ids)
+
+    一次批量查代替 per-App N+1 往返（REWORK Minor #1 / 对齐 codebase
+    既有 .in_() 批量范式）。caller 用返回集合内存过滤 shared_raw
+    （`aid in matched`）。含 [KB] 名 App 也一视同仁——无匹配 tag 即不在
+    返回集 / 无名字特例。
+
+    前置：caller 须先判 `user_tag_ids` 非空（空集时本查询 IN () 恒空，
+    caller 短路省去这趟 RTT）。与 query_owned_apps 同风格。
+    """
+    stmt = (
+        select(AppTag.dify_app_id)
+        .where(AppTag.tag_id.in_(user_tag_ids))
+        .distinct()
+    )
+    result = await db.execute(stmt)
+    return {row.dify_app_id for row in result}
+
+
 async def list_apps_for_user(
     *,
     db: AsyncSession,
@@ -104,10 +150,29 @@ async def list_apps_for_user(
         api_key=settings.DIFY_CONSOLE_API_KEY,
         tenant_id=settings.DIFY_TENANT_ID,
     )
-    shared_kb = [
-        a for a in shared_raw
-        if detect_app_type(a.get("name") or "", a.get("tags"))
-    ]
+    if settings.tags_routing_enabled:
+        # flag ON (2D-A1 通电 / spec §3 / §6 #1): shared = shared_raw 中
+        # dify_app_id 的 app_tags 与该 user 的 user_tags 有交集者（含 [KB]，
+        # 统一标签控制，不走名字特例）。
+        user_tag_ids = await query_user_tag_ids(db, UUID(user_id))
+        if not user_tag_ids:
+            # restrictive 空集语义：user 无标签 → 交集恒空 → 共享全隐。
+            # 短路省去批量查这趟 RTT（REWORK Minor #1a）。
+            shared_kb = []
+        else:
+            # 单次批量查取「与 user 标签有交集的 app_id 集合」，再内存过滤
+            # shared_raw（REWORK Minor #1b / N+1 → 1 query）。
+            matched_app_ids = await query_app_ids_matching_tags(db, user_tag_ids)
+            shared_kb = [
+                a for a in shared_raw
+                if a.get("id") and a["id"] in matched_app_ids
+            ]
+    else:
+        # flag OFF (prod 现状 / 本批一字不改 / DB tag 表不消费): [KB] 名字过滤。
+        shared_kb = [
+            a for a in shared_raw
+            if detect_app_type(a.get("name") or "", a.get("tags"))
+        ]
 
     owned = await query_owned_apps(db, UUID(user_id))
 
