@@ -11,7 +11,7 @@ from __future__ import annotations
 import uuid
 from typing import Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class UserOut(BaseModel):
@@ -41,6 +41,25 @@ class UserUpdate(BaseModel):
     dingtalk_userid: Optional[str] = Field(default=None, max_length=64)
     dept_path: Optional[str] = Field(default=None, max_length=255)
     is_active: Optional[bool] = None
+
+    @field_validator("name")
+    @classmethod
+    def _reject_explicit_none(cls, v: Optional[str]) -> Optional[str]:
+        # PATCH partial-update semantics: omit the ``name`` key to keep the
+        # current value. An explicit ``{"name": null}`` would otherwise
+        # bypass ``min_length=1`` (Optional[str] lets None through type
+        # validation) → ``setattr(user, "name", None)`` → NOT NULL UPDATE
+        # → IntegrityError → misleading 409. Pydantic v2 only runs
+        # validators on explicitly-set values (defaults are skipped unless
+        # ``validate_default=True``), so the omit-to-keep path stays
+        # unchanged; only the explicit-null path is gated. dingtalk_userid
+        # / dept_path are intentionally NOT gated — null clears them (the
+        # columns are nullable). Mirror of admin/tags/schemas.py:TagUpdate.
+        if v is None:
+            raise ValueError(
+                "name cannot be null; omit the field to keep the existing value"
+            )
+        return v
 
 
 class UserListResponse(BaseModel):

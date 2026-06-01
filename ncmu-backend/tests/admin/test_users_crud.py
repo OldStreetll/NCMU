@@ -284,6 +284,69 @@ async def test_update_user_partial_name(app_client, jwt_token, async_db):
 
 
 # --------------------------------------------------------------------- #
+# (10a-1) TASK-FIX-NULLNAME — PATCH {"name": null} → 422 (validator rejects).
+# Regression for PE-06 latent bug: Optional[str] let null bypass min_length=1
+# → setattr(user, "name", None) → NOT NULL UPDATE → misleading 409. The
+# _reject_explicit_none field_validator (mirror of TagUpdate) gates it at the
+# request layer. 守 feedback_pydantic_v2_optional_min_length_null_bypass.
+# --------------------------------------------------------------------- #
+async def test_update_user_name_explicit_null_returns_422(
+    app_client, jwt_token, async_db,
+):
+    resp = await app_client.patch(
+        f"/api/v1/ncmu/admin/users/{ZHAOLIU}",
+        json={"name": None},
+        headers={"Authorization": f"Bearer {jwt_token}"},
+    )
+    assert resp.status_code == 422, resp.text
+    # FastAPI request-validation error: detail is a list of error dicts;
+    # our ValueError message must surface so the SPA can show it.
+    assert "name cannot be null" in resp.text
+    # DB untouched — name not nulled.
+    refreshed = await async_db.get(User, uuid.UUID(ZHAOLIU))
+    assert refreshed.name is not None
+
+
+# --------------------------------------------------------------------- #
+# (10a-2) TASK-FIX-NULLNAME — omit ``name`` key → partial update still works
+# (the validator only runs on explicitly-set values; omit-to-keep unaffected).
+# --------------------------------------------------------------------- #
+async def test_update_user_omit_name_updates_other_field(
+    app_client, jwt_token, async_db,
+):
+    resp = await app_client.patch(
+        f"/api/v1/ncmu/admin/users/{ZHAOLIU}",
+        json={"dept_path": "/财务/审计"},  # no "name" key
+        headers={"Authorization": f"Bearer {jwt_token}"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["dept_path"] == "/财务/审计"
+    assert body["name"]  # name preserved (non-empty), not nulled
+    refreshed = await async_db.get(User, uuid.UUID(ZHAOLIU))
+    assert refreshed.dept_path == "/财务/审计"
+    assert refreshed.name is not None
+
+
+# --------------------------------------------------------------------- #
+# (10a-3) TASK-FIX-NULLNAME — PATCH {"name": "新名"} → 200 (valid string path
+# unaffected by the validator).
+# --------------------------------------------------------------------- #
+async def test_update_user_name_valid_string_succeeds(
+    app_client, jwt_token, async_db,
+):
+    resp = await app_client.patch(
+        f"/api/v1/ncmu/admin/users/{ZHAOLIU}",
+        json={"name": "赵六新名"},
+        headers={"Authorization": f"Bearer {jwt_token}"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["name"] == "赵六新名"
+    refreshed = await async_db.get(User, uuid.UUID(ZHAOLIU))
+    assert refreshed.name == "赵六新名"
+
+
+# --------------------------------------------------------------------- #
 # (10b) PATCH /admin/users/{id} — dingtalk_userid collides → 409 + code 1010
 # --------------------------------------------------------------------- #
 async def test_update_user_dingtalk_duplicate_returns_409(
