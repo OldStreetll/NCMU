@@ -150,6 +150,13 @@ class Settings(BaseSettings):
         default="https://oapi.dingtalk.com",
         validation_alias="DINGTALK_OAPI_BASE",
     )
+    # TASK-2DA2S-03: 同步子树根部门 id（Boss 拍：只同步「软件开发部」子树）。
+    # 默认 None —— GET /admin/dingtalk/departments 发现 dept_id 后填 .env；
+    # POST /sync 的 body 未给 root_dept_id 时回落此值，两者皆空 → 400。
+    dingtalk_sync_root_dept_id: int | None = Field(
+        default=None,
+        validation_alias="DINGTALK_SYNC_ROOT_DEPT_ID",
+    )
 
     @property
     def admin_user_id_set(self) -> set[str]:
