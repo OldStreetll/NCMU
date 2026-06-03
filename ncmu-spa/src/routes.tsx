@@ -2,6 +2,10 @@ import { lazy, Suspense } from "react";
 import { Navigate, Route, Routes } from "react-router-dom";
 import { Spin } from "antd";
 import LoginPage from "@/pages/LoginPage";
+// TASK-LOGIN-2: DingTalk OAuth callback landing page — a pre-auth public
+// route (like /login) with no layout/guard. Direct-imported (not lazy) to
+// match LoginPage: both are part of the unauthenticated entry flow.
+import DingtalkCallbackPage from "@/pages/DingtalkCallbackPage";
 import { RoleGuard } from "@/components/guard/RoleGuard";
 import { EmployeeLayout } from "@/layouts/EmployeeLayout";
 import { AdminLayout } from "@/layouts/AdminLayout";
@@ -88,6 +92,13 @@ export function AppRoutes() {
     <Routes>
       <Route path="/" element={<RootRedirect />} />
       <Route path="/login" element={<LoginPage />} />
+      {/* TASK-LOGIN-2: DingTalk OAuth return URL. Public + guard-free (same
+          level as /login) — the user isn't authenticated until this page
+          completes the code+state exchange and stores the JWT. */}
+      <Route
+        path="/auth/dingtalk/callback"
+        element={<DingtalkCallbackPage />}
+      />
 
       {/* Employee home + the 5 mode pages + Personal-KB (my-kb) all sit
           inside EmployeeLayout and require requiredRole="employee". */}
