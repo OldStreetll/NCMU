@@ -157,44 +157,86 @@ async def test_get_userid_by_unionid_errcode_raises(http_client, ding_settings):
 
 
 # ===================================================================== #
-# B. state CSRF 助手单元（无网络）
+# B. state CSRF 助手单元（async / fakeredis，无网络）
 # ===================================================================== #
+# TASK-STATESTORE-1：state 函数改 async 并收 redis；用 fakeredis 验 SETEX/GETDEL
+# 单次性 + 「第 1 层（签名/cookie）不过不消费 redis」的安全性质。
 SECRET = "unit-state-secret-32-bytes-min-xxxxxxxx"
 
 
-def test_state_roundtrip_valid():
-    from ncmu_backend.auth.dingtalk_login import generate_login_state, verify_login_state
-    state = generate_login_state(SECRET)
-    # double-submit：query 与 cookie 同值 + 签名有效 → True。
-    assert verify_login_state(state, state, SECRET) is True
+def _new_fake_redis():
+    import fakeredis.aioredis
+    return fakeredis.aioredis.FakeRedis()
 
 
-def test_state_mismatch_query_ne_cookie():
-    from ncmu_backend.auth.dingtalk_login import generate_login_state, verify_login_state
-    s1 = generate_login_state(SECRET)
-    s2 = generate_login_state(SECRET)
-    assert verify_login_state(s1, s2, SECRET) is False
-
-
-def test_state_missing_cookie_false():
-    from ncmu_backend.auth.dingtalk_login import generate_login_state, verify_login_state
-    state = generate_login_state(SECRET)
-    assert verify_login_state(state, None, SECRET) is False
-    assert verify_login_state(None, state, SECRET) is False
-
-
-def test_state_tampered_signature_false():
-    from ncmu_backend.auth.dingtalk_login import generate_login_state, verify_login_state
-    state = generate_login_state(SECRET)
+async def _key_present(redis, state: str) -> bool:
+    from ncmu_backend.auth.dingtalk_login import _state_key
     nonce = state.split(".")[0]
-    forged = f"{nonce}.deadbeef"  # query==cookie 但签名错 → 篡改/伪造
-    assert verify_login_state(forged, forged, SECRET) is False
+    return await redis.exists(_state_key(nonce)) == 1
 
 
-def test_state_wrong_secret_false():
+async def test_state_roundtrip_and_single_use():
+    """generate 写 nonce → 首次 verify True 且消费 → 第二次 verify False（真单次）。"""
     from ncmu_backend.auth.dingtalk_login import generate_login_state, verify_login_state
-    state = generate_login_state(SECRET)
-    assert verify_login_state(state, state, "a-different-secret-totally") is False
+    redis = _new_fake_redis()
+    state = await generate_login_state(SECRET, redis)
+    assert await _key_present(redis, state) is True          # SETEX 写入
+    assert await verify_login_state(state, state, SECRET, redis) is True   # 首用
+    assert await _key_present(redis, state) is False         # GETDEL 已消费
+    assert await verify_login_state(state, state, SECRET, redis) is False  # 重放被拒
+    await redis.aclose()
+
+
+async def test_state_mismatch_query_ne_cookie_no_burn():
+    """query≠cookie（第 1 层 fail）→ False 且 **不消费** redis（s1 nonce 仍在）。"""
+    from ncmu_backend.auth.dingtalk_login import generate_login_state, verify_login_state
+    redis = _new_fake_redis()
+    s1 = await generate_login_state(SECRET, redis)
+    s2 = await generate_login_state(SECRET, redis)
+    assert await verify_login_state(s1, s2, SECRET, redis) is False
+    assert await _key_present(redis, s1) is True             # 未被烧
+    await redis.aclose()
+
+
+async def test_state_missing_cookie_false():
+    from ncmu_backend.auth.dingtalk_login import generate_login_state, verify_login_state
+    redis = _new_fake_redis()
+    state = await generate_login_state(SECRET, redis)
+    assert await verify_login_state(state, None, SECRET, redis) is False
+    assert await verify_login_state(None, state, SECRET, redis) is False
+    assert await _key_present(redis, state) is True          # cookie 缺失不消费
+    await redis.aclose()
+
+
+async def test_state_tampered_signature_no_burn():
+    """🎯 query==cookie 但签名错（伪造）→ False 且原 nonce **未被烧**（第 1 层守住，防 DoS 烧合法 nonce）。"""
+    from ncmu_backend.auth.dingtalk_login import generate_login_state, verify_login_state
+    redis = _new_fake_redis()
+    state = await generate_login_state(SECRET, redis)
+    nonce = state.split(".")[0]
+    forged = f"{nonce}.deadbeef"                              # 真 nonce + 假签名
+    assert await verify_login_state(forged, forged, SECRET, redis) is False
+    assert await _key_present(redis, state) is True          # 合法 nonce 仍在
+    await redis.aclose()
+
+
+async def test_state_wrong_secret_no_burn():
+    from ncmu_backend.auth.dingtalk_login import generate_login_state, verify_login_state
+    redis = _new_fake_redis()
+    state = await generate_login_state(SECRET, redis)
+    assert await verify_login_state(state, state, "a-different-secret-totally", redis) is False
+    assert await _key_present(redis, state) is True          # 签名层 fail，不消费
+    await redis.aclose()
+
+
+async def test_state_nonce_absent_in_redis_false():
+    """签名/cookie 都对，但 nonce 不在 redis（过期 / 从未写）→ 第 2 层拒绝。"""
+    from ncmu_backend.auth.dingtalk_login import generate_login_state, verify_login_state, _state_key
+    redis = _new_fake_redis()
+    state = await generate_login_state(SECRET, redis)
+    await redis.delete(_state_key(state.split(".")[0]))      # 模拟过期/已消费
+    assert await verify_login_state(state, state, SECRET, redis) is False
+    await redis.aclose()
 
 
 # ===================================================================== #
@@ -253,7 +295,7 @@ async def _get_state(app_client) -> str:
     return data["state"]
 
 
-async def test_callback_happy_path_signs_consumable_jwt(app_client, async_db, jwt_secret):
+async def test_callback_happy_path_signs_consumable_jwt(app_client, async_db, jwt_secret, fake_redis):
     """有效 code → 匹配 user → JWT(sub=user.id，shape 同 dev-login，get_current_user 可消费)。"""
     from ncmu_backend.auth.deps import get_current_user
 
@@ -277,7 +319,7 @@ async def test_callback_happy_path_signs_consumable_jwt(app_client, async_db, jw
     assert cu.name == "登录测试员"
 
 
-async def test_callback_user_not_provisioned_403(app_client, async_db):
+async def test_callback_user_not_provisioned_403(app_client, async_db, fake_redis):
     """解析出企业 userid 但 NCMU 无此 dingtalk_userid → 403「未开通」(code 1322)。"""
     await _seed_user(async_db, "ding-emp-001")
     with respx.mock(assert_all_called=False) as rx:
@@ -290,7 +332,7 @@ async def test_callback_user_not_provisioned_403(app_client, async_db):
     assert _state_cookie_cleared(resp), resp.headers.get_list("set-cookie")
 
 
-async def test_callback_state_mismatch_rejected_400(app_client, async_db):
+async def test_callback_state_mismatch_rejected_400(app_client, async_db, fake_redis):
     """state（query）与下发 cookie 不符 → 400 (code 1320)，绝不进入链路。"""
     await _seed_user(async_db, "ding-emp-001")
     with respx.mock(assert_all_called=False) as rx:
@@ -308,7 +350,7 @@ async def test_callback_state_mismatch_rejected_400(app_client, async_db):
     assert _state_cookie_cleared(resp), resp.headers.get_list("set-cookie")
 
 
-async def test_callback_missing_cookie_rejected_400(app_client, async_db):
+async def test_callback_missing_cookie_rejected_400(app_client, async_db, fake_redis):
     """有 state query 但无 cookie（未发起授权 / 跨站 CSRF 无 cookie）→ 400 (1320)。"""
     await _seed_user(async_db, "ding-emp-001")
     # 不调用 /login → cookie jar 无 state cookie。
@@ -319,7 +361,7 @@ async def test_callback_missing_cookie_rejected_400(app_client, async_db):
     assert resp.json()["detail"]["code"] == 1320
 
 
-async def test_callback_missing_code_rejected_400(app_client, async_db):
+async def test_callback_missing_code_rejected_400(app_client, async_db, fake_redis):
     """state 有效但回调缺 code（用户取消授权）→ 400 (code 1321)。"""
     await _seed_user(async_db, "ding-emp-001")
     with respx.mock(assert_all_called=False) as rx:
@@ -330,7 +372,7 @@ async def test_callback_missing_code_rejected_400(app_client, async_db):
     assert resp.json()["detail"]["code"] == 1321
 
 
-async def test_callback_upstream_errcode_502(app_client, async_db):
+async def test_callback_upstream_errcode_502(app_client, async_db, fake_redis):
     """getbyunionid errcode≠0（老 oapi 上游故障）→ 502 (code 1323)，绝不静默放行。"""
     await _seed_user(async_db, "ding-emp-001")
     with respx.mock(assert_all_called=False) as rx:
@@ -360,7 +402,7 @@ async def test_callback_upstream_errcode_502(app_client, async_db):
     assert _state_cookie_cleared(resp), resp.headers.get_list("set-cookie")
 
 
-async def test_callback_upstream_v1_non_2xx_502(app_client, async_db):
+async def test_callback_upstream_v1_non_2xx_502(app_client, async_db, fake_redis):
     """第一步 userAccessToken v1.0 非 2xx（无 errcode）→ 502 (code 1323)，不静默。"""
     await _seed_user(async_db, "ding-emp-001")
     with respx.mock(assert_all_called=False) as rx:
@@ -377,3 +419,33 @@ async def test_callback_upstream_v1_non_2xx_502(app_client, async_db):
     assert "invalid client" not in body and "Unauthorized" not in body
     assert detail["message"] == "钉钉登录暂时不可用，请稍后重试"
     assert _state_cookie_cleared(resp), resp.headers.get_list("set-cookie")
+
+
+# ── TASK-STATESTORE-1 核心新增：真单次性（redis 重放防护，端到端） ──────────────
+async def test_callback_replay_same_state_rejected(app_client, async_db, fake_redis):
+    """🎯 真单次性：首次成功后，**重放同一 code+state（且重新呈递 cookie）→ 拒绝**。
+
+    第二次显式带回原 state cookie（模拟攻击者捕获 state+cookie 重放），绕过 jar
+    在首次成功时对 cookie 的清除——这样签名+double-submit 第 1 层会**通过**，唯一
+    挡住重放的就是 redis nonce 已被首次 GETDEL 消费（第 2 层）。证明防重放真正
+    来自 redis 单次性，而非仅靠 cookie 清除。
+    """
+    await _seed_user(async_db, "ding-emp-001")
+    with respx.mock(assert_all_called=False) as rx:
+        _mock_chain(rx, userid="ding-emp-001")
+        state = await _get_state(app_client)
+        # 首次：成功消费 nonce。
+        r1 = await app_client.get(CALLBACK_URL, params={"code": "valid-code", "state": state})
+        assert r1.status_code == 200, r1.text
+        # 重放：显式再带回 state cookie（jar 已被首次 delete_cookie 清掉）。
+        # 用 Cookie 头而非 per-request cookies=（后者 httpx 已弃用）。
+        r2 = await app_client.get(
+            CALLBACK_URL,
+            params={"code": "valid-code", "state": state},
+            headers={"Cookie": f"{LOGIN_STATE_COOKIE}={state}"},
+        )
+    assert r2.status_code == 400, r2.text
+    assert r2.json()["detail"]["code"] == 1320   # redis 无该 nonce → 第 2 层拒绝
+    # nonce 确已不在 redis（首次已消费）。
+    from ncmu_backend.auth.dingtalk_login import _state_key
+    assert await fake_redis.exists(_state_key(state.split(".")[0])) == 0

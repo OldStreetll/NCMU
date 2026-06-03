@@ -11,10 +11,12 @@
 🔴 安全硬约束（spec §3）：
 - 匹配用的企业 userid **必须服务端经 ①②③ 解析**，绝不接受前端/请求传入 userid
   （:func:`login_via_dingtalk` 只吃 ``code``，userid 全程在链路内部解析，无入口外泄）。
-- ``state`` 防 CSRF：:func:`generate_login_state` 发 HMAC 签名 state 同时写 query
-  + cookie（double-submit），:func:`verify_login_state` 回调校验 query==cookie
-  且签名有效，不符拒绝（恒定时比较防 timing）。state TTL 由 cookie ``max-age``
-  承载（短期）；签名保证 state 由本服务签发未被篡改。
+- ``state`` 防 CSRF + 防重放（TASK-STATESTORE-1）：:func:`generate_login_state`
+  发 HMAC 签名 state 同时写 query + cookie（double-submit）**并把 nonce SETEX 进
+  redis**（服务端单次性记录 / TTL 300s）；:func:`verify_login_state` 校验
+  query==cookie 且签名有效（恒定时比较防 timing），**再 GETDEL 原子消费 redis
+  nonce**（存在=首用有效即销毁 / 不存在=过期或重放→拒绝）。主 TTL 由 redis
+  承载，cookie ``max-age`` 作次级 TTL；redis 单次性堵住 300s 窗口内重放。
 - 钉钉任何链路失败 → :class:`~ncmu_backend.dingtalk.client.DingTalkApiError`
   上抛（不静默放行）；userid 未匹配 → :class:`DingTalkLoginDenied`（拒绝「未开通」）。
 
@@ -38,10 +40,17 @@ from ncmu_backend.db.models import User
 
 # state 三段式（cookie + query 同值，double-submit）。cookie 名固定。
 LOGIN_STATE_COOKIE = "ncmu_ding_login_state"
-# state cookie 短 TTL（秒）—— 授权往返窗口足够，超时则 cookie 失效 → 回调拒绝。
+# state TTL（秒）—— 授权往返窗口足够。**主 TTL 由 redis key 承载**（SETEX），
+# cookie max-age 作次级 TTL；超时则 redis key 消失 + cookie 失效 → 回调拒绝。
 LOGIN_STATE_TTL_S = 300
 # nonce 与签名以 "." 分隔（urlsafe base64 / hex 均不含 "."，无歧义）。
 _STATE_SEP = "."
+# redis key 前缀（NCMU 用 DB 0 / 见 config.REDIS_URL）。
+LOGIN_STATE_KEY_PREFIX = "login_state:"
+
+
+def _state_key(nonce: str) -> str:
+    return f"{LOGIN_STATE_KEY_PREFIX}{nonce}"
 
 
 class DingTalkLoginDenied(Exception):
@@ -53,19 +62,27 @@ class DingTalkLoginDenied(Exception):
 
 
 # --------------------------------------------------------------------- #
-# state —— HMAC 签名 + double-submit cookie（无服务端存储，stateless CSRF）
+# state —— HMAC 签名 + double-submit cookie + redis 单次性记录（防御纵深）
 # --------------------------------------------------------------------- #
+# TASK-STATESTORE-1：在原「签名 + double-submit cookie」之上加一层**服务端
+# 单次性**——发起时把 nonce SETEX 进 redis（TTL 300s），回调时 GETDEL 原子
+# 消费：存在=有效且即刻销毁（真单次），不存在=过期/已用过→拒绝。这堵住了
+# 纯无状态 HMAC+cookie 在 300s 窗口内的重放（独审 LOGIN-2 panel state replay /
+# spec §7 live 升级项）。签名 + cookie 校验**保留**（防御纵深，不删）。
 def _sign_nonce(nonce: str, secret: str) -> str:
     return hmac.new(secret.encode(), nonce.encode(), hashlib.sha256).hexdigest()
 
 
-def generate_login_state(secret: str) -> str:
-    """生成 ``{nonce}.{hmac(nonce)}`` 形式的登录 state。
+async def generate_login_state(secret: str, redis) -> str:
+    """生成 ``{nonce}.{hmac(nonce)}`` state，并把 nonce SETEX 写入 redis。
 
     nonce 随机；签名用 ``NCMU_JWT_SECRET``（已是服务端密钥，无需新密钥）。
-    返回值同时塞进授权 URL 的 ``state`` 参数与 ``LOGIN_STATE_COOKIE`` cookie。
+    ``redis.set(login_state:{nonce}, "1", ex=300)`` 留服务端单次性记录；TTL 由
+    redis 承载。返回值同时塞进授权 URL 的 ``state`` 参数与 ``LOGIN_STATE_COOKIE``
+    cookie（double-submit）。
     """
     nonce = secrets.token_urlsafe(24)
+    await redis.set(_state_key(nonce), "1", ex=LOGIN_STATE_TTL_S)
     return f"{nonce}{_STATE_SEP}{_sign_nonce(nonce, secret)}"
 
 
@@ -79,19 +96,32 @@ def _signature_valid(state: str, secret: str) -> bool:
     return hmac.compare_digest(sig, _sign_nonce(nonce, secret))
 
 
-def verify_login_state(
-    state_from_query: str | None, state_from_cookie: str | None, secret: str,
+async def verify_login_state(
+    state_from_query: str | None, state_from_cookie: str | None,
+    secret: str, redis,
 ) -> bool:
-    """回调 state 校验：query/cookie 均在、相等（double-submit）且签名有效。
+    """回调 state 校验（防御纵深 / 任一层不过即 False）：
 
-    任一不满足 → False（调用方拒绝）。``compare_digest`` 恒定时比较防 timing
-    侧信道。cookie 缺失（过期 / 未发起授权 / CSRF 跨站无 cookie）即 False。
+    1. **签名 + double-submit cookie**：query/cookie 均在、恒定时相等、且签名
+       有效（证明由本服务签发未被篡改）。**不通过则不触碰 redis**——避免伪造
+       state 烧掉某个合法待用 nonce。
+    2. **redis 单次性消费**：``GETDEL login_state:{nonce}`` 原子 get+del。存在
+       → 首次使用，有效且即刻销毁（真单次）；不存在（过期 / 已被消费 / 重放）
+       → 拒绝。
+
+    cookie 缺失（过期 / 未发起授权 / CSRF 跨站无 cookie）在第 1 层即 False。
     """
+    # 第 1 层：签名 + double-submit cookie（不命中不消费 redis）。
     if not state_from_query or not state_from_cookie:
         return False
     if not hmac.compare_digest(state_from_query, state_from_cookie):
         return False
-    return _signature_valid(state_from_query, secret)
+    if not _signature_valid(state_from_query, secret):
+        return False
+    # 第 2 层：redis 原子消费（单次性）。
+    nonce = state_from_query.partition(_STATE_SEP)[0]
+    consumed = await redis.getdel(_state_key(nonce))
+    return consumed is not None
 
 
 def build_authorize_url(settings: Settings, state: str) -> str:

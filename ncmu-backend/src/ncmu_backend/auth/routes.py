@@ -38,6 +38,7 @@ from ncmu_backend.config import Settings
 from ncmu_backend.db.models import User
 from ncmu_backend.dingtalk.client import DingTalkApiError
 from ncmu_backend.deps import get_db, get_settings
+from ncmu_backend.main import get_redis  # lifespan-owned Redis (TASK-STATESTORE-1)
 from ncmu_backend.schemas.auth import (
     DevLoginRequest,
     DevLoginResponse,
@@ -179,8 +180,9 @@ def _login_error_response(status_code: int, code: int, message: str) -> JSONResp
 async def dingtalk_login_init(
     response: Response,
     settings: Settings = Depends(get_settings),
+    redis=Depends(get_redis),
 ) -> DingTalkLoginInitResponse:
-    state = generate_login_state(settings.NCMU_JWT_SECRET)
+    state = await generate_login_state(settings.NCMU_JWT_SECRET, redis)
     response.set_cookie(
         key=LOGIN_STATE_COOKIE,
         value=state,
@@ -208,6 +210,7 @@ async def dingtalk_login_callback(
     state_cookie: str | None = Cookie(default=None, alias=LOGIN_STATE_COOKIE),
     db: AsyncSession = Depends(get_db),
     settings: Settings = Depends(get_settings),
+    redis=Depends(get_redis),
 ) -> DevLoginResponse | JSONResponse:
     # 所有「state 已读」分支（成功 / 403 / 502 / 缺 code）都经
     # _login_error_response 或 happy 路径的 response.delete_cookie 清除 state
@@ -215,7 +218,7 @@ async def dingtalk_login_callback(
 
     # ① CSRF：state（query）必须与下发时写入的 cookie 一致且签名有效。
     #    校验失败也清 cookie（避免遗留半残 state；缺 cookie 时 delete 无害）。
-    if not verify_login_state(state, state_cookie, settings.NCMU_JWT_SECRET):
+    if not await verify_login_state(state, state_cookie, settings.NCMU_JWT_SECRET, redis):
         return _login_error_response(
             status.HTTP_400_BAD_REQUEST, 1320, "invalid or missing login state"
         )

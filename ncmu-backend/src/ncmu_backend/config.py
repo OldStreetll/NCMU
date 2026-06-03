@@ -194,6 +194,13 @@ class Settings(BaseSettings):
         validation_alias="DINGTALK_OAUTH_API_BASE",
     )
 
+    # --- Redis (TASK-STATESTORE-1) --------------------------------
+    # 钉钉登录 CSRF state 的服务端单次性存储（SETEX 写 nonce / GETDEL 消费）。
+    # 默认对齐 .env REDIS_URL=redis://redis:6379/0 —— **NCMU 用 DB 0**（Dify
+    # celery 用 /1、FastGPT 用 /2，互不串）。ncmu-redis 无 requirepass。这是
+    # backend 首个 Redis 消费者。
+    REDIS_URL: str = "redis://redis:6379/0"
+
     @property
     def admin_user_id_set(self) -> set[str]:
         """Parsed NCMU_ADMIN_USER_IDS as a set, lower-cased."""

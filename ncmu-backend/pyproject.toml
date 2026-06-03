@@ -35,6 +35,13 @@ dependencies = [
     # image, so declare it explicitly or a clean `pip install .` rebuild drops
     # it and `import yaml` breaks at runtime.
     "pyyaml>=6,<7",
+    # TASK-STATESTORE-1 (2026-06-03): DingTalk login CSRF state upgraded from
+    # stateless HMAC+cookie to a server-side single-use record in Redis
+    # (closes the 300s replay window). redis>=5 ships the async client
+    # `redis.asyncio`. NCMU uses redis DB 0 (REDIS_URL=redis://redis:6379/0);
+    # this is the backend's first Redis consumer. GETDEL needs Redis 7
+    # (ncmu-redis is redis:7-alpine).
+    "redis>=5,<6",
 ]
 
 [project.optional-dependencies]
@@ -43,6 +50,10 @@ dev = [
     "pytest-asyncio>=0.23,<1",
     "pytest-postgresql>=6,<8",
     "respx>=0.21,<1",
+    # TASK-STATESTORE-1: in-process fake Redis (incl. fakeredis.aioredis)
+    # so login-state tests exercise the SETEX/GETDEL single-use path without
+    # a real redis server.
+    "fakeredis>=2,<3",
 ]
 
 [tool.setuptools.packages.find]

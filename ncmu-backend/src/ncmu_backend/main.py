@@ -25,6 +25,7 @@ from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
 import httpx
+import redis.asyncio as aioredis
 from fastapi import FastAPI, Request
 
 import ncmu_backend
@@ -53,6 +54,24 @@ def get_dify_client(request: Request) -> httpx.AsyncClient:
     return client
 
 
+def get_redis(request: Request) -> aioredis.Redis:
+    """FastAPI dependency: return the lifespan-owned Redis client.
+
+    TASK-STATESTORE-1 — DingTalk login uses this for single-use CSRF state
+    (SETEX nonce on init, GETDEL on callback). Mirrors get_dify_client:
+    the client is built once in lifespan startup and stored on
+    `app.state.redis`; tests override this dependency (or set app.state.redis)
+    with a fakeredis client.
+    """
+    client = getattr(request.app.state, "redis", None)
+    if client is None:
+        raise RuntimeError(
+            "redis not initialised — lifespan startup did not run "
+            "(or `app` was constructed without lifespan=lifespan)."
+        )
+    return client
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
@@ -70,6 +89,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.dify_client = httpx.AsyncClient(
         timeout=httpx.Timeout(60.0, connect=5.0)
     )
+
+    # TASK-STATESTORE-1: process-singleton Redis client (DB 0) for DingTalk
+    # login single-use CSRF state. from_url is lazy (no connect until first
+    # command), mirroring the dify_client singleton lifetime via app.state.
+    app.state.redis = aioredis.from_url(settings.REDIS_URL)
 
     # TASK-69 (Phase 2B B1) + TASK-79-BACKEND-ARCH-FIX (2026-05-12):
     # workflow dispatcher 单例。Dispatcher's constructor takes a default
@@ -130,6 +154,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     client = getattr(app.state, "dify_client", None)
     if client is not None:
         await client.aclose()
+
+    # TASK-STATESTORE-1: close the Redis client's connection pool on shutdown.
+    redis_client = getattr(app.state, "redis", None)
+    if redis_client is not None:
+        await redis_client.aclose()
 
     # REWORK-INDEP-I2: process-singleton FastGPTReadOnlyClient owns an
     # httpx.AsyncClient. Close it once on shutdown so the connection

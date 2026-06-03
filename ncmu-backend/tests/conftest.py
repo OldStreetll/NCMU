@@ -375,3 +375,24 @@ async def fake_dify(app_client):
     fake = _FakeDifyClient()
     app.dependency_overrides[get_dify_client] = lambda: fake
     yield fake
+
+
+@pytest_asyncio.fixture
+async def fake_redis(app_client):
+    """Override ``get_redis`` with an in-process fakeredis async client.
+
+    TASK-STATESTORE-1 — DingTalk login uses Redis for single-use CSRF state
+    (SETEX nonce on /login, GETDEL on /callback). One FakeRedis instance is
+    shared across both requests of a test (so the nonce written by /login is
+    visible/consumable by /callback). Yields the instance so tests can assert
+    on key presence (e.g. that a sig-failed verify did NOT burn the nonce).
+
+    Depends on ``app_client`` so the dependency override clears in its teardown.
+    """
+    import fakeredis.aioredis
+    from ncmu_backend.main import app, get_redis
+
+    fake = fakeredis.aioredis.FakeRedis()
+    app.dependency_overrides[get_redis] = lambda: fake
+    yield fake
+    await fake.aclose()
