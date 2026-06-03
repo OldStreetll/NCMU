@@ -41,13 +41,22 @@ REAL_DEFAULTS: dict[str, str] = {
     "DIFY_TENANT_ID": "00000000-0000-4000-8000-000000000000",
     "FASTGPT_API_KEY": "real-fastgpt-key",
     "SILICONFLOW_API_KEY": "real-siliconflow-key",
+    # TASK-PRODVAL-1: the two DingTalk-login keys joined the prod-required
+    # list, so _build() must seed them with real values too — otherwise every
+    # prod test below would now trip on their CHANGE_ME defaults. Snake-case
+    # kwargs work because Settings has populate_by_name=True. The redirect URI
+    # real value MUST NOT contain the "CHANGE_ME" substring.
+    "dingtalk_app_secret": "real-dingtalk-app-secret",
+    "dingtalk_login_redirect_uri": (
+        "https://ncmu.example.com/api/v1/ncmu/auth/dingtalk/callback"
+    ),
 }
 
 
 def _build(**overrides: str) -> Settings:
-    """Build Settings with all 6 sensitive keys set to real values, then apply
+    """Build Settings with all sensitive keys set to real values, then apply
     `overrides`. Lets each test focus on the single field it varies without
-    leaking placeholder defaults from the other five."""
+    leaking placeholder defaults from the others."""
     kwargs: dict[str, str] = dict(REAL_DEFAULTS)
     kwargs.update(overrides)
     return Settings(**kwargs)
@@ -58,11 +67,14 @@ def _build(**overrides: str) -> Settings:
 # ---------------------------------------------------------------------------
 
 
-def test_sensitive_keys_prod_required_lists_six_fields() -> None:
+def test_sensitive_keys_prod_required_lists_expected_fields() -> None:
     # REWORK-A-INDEP-DEPLOY-2 (2026-05-14): DIFY_TENANT_ID added — Dify
     # ADMIN_API_KEY bypass (path B') gates on a non-empty X-WORKSPACE-ID
     # header, so a placeholder tenant_id in prod must fail-fast same as
     # a placeholder API key.
+    # TASK-PRODVAL-1 (2026-06-03): the two DingTalk-login keys are appended
+    # (snake attribute names). Order matters — the validator raises on the
+    # FIRST placeholder in iteration order (see multi-key test below).
     assert SENSITIVE_KEYS_PROD_REQUIRED == [
         "NCMU_JWT_SECRET",
         "DIFY_CONSOLE_API_KEY",
@@ -70,6 +82,8 @@ def test_sensitive_keys_prod_required_lists_six_fields() -> None:
         "DIFY_TENANT_ID",
         "FASTGPT_API_KEY",
         "SILICONFLOW_API_KEY",
+        "dingtalk_app_secret",
+        "dingtalk_login_redirect_uri",
     ]
 
 
@@ -201,6 +215,81 @@ def test_prod_each_sensitive_key_raises_in_isolation(placeholder_key: str) -> No
     with pytest.raises(ValidationError) as exc_info:
         _build(**overrides)
     assert placeholder_key in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
+# TASK-PRODVAL-1 — DingTalk-login keys join the prod-required gate
+# ---------------------------------------------------------------------------
+
+
+def test_prod_dingtalk_app_secret_placeholder_raises() -> None:
+    """app_secret is the OAuth clientSecret for the login exchange — a
+    placeholder in prod must fail-fast like any other secret (AC#1)."""
+    with pytest.raises(ValidationError) as exc_info:
+        _build(DEPLOY_PROFILE="prod", dingtalk_app_secret="CHANGE_ME")
+    msg = str(exc_info.value)
+    assert "dingtalk_app_secret" in msg
+    assert "placeholder in prod deployment" in msg
+
+
+def test_prod_redirect_uri_nested_placeholder_default_raises() -> None:
+    """The redirect-URI config default embeds the placeholder mid-string
+    (`https://CHANGE_ME/...`). startswith("CHANGE_ME") would MISS it — the
+    substring switch is what makes this raise (AC#1, the core gap fix). This
+    value is byte-identical to config.py's `dingtalk_login_redirect_uri`
+    default."""
+    with pytest.raises(ValidationError) as exc_info:
+        _build(
+            DEPLOY_PROFILE="prod",
+            dingtalk_login_redirect_uri=(
+                "https://CHANGE_ME/api/v1/ncmu/auth/dingtalk/callback"
+            ),
+        )
+    assert "dingtalk_login_redirect_uri" in str(exc_info.value)
+
+
+def test_prod_dingtalk_keys_real_values_pass() -> None:
+    """Both DingTalk-login keys at real values → no raise in prod (AC#2).
+    The redirect URI real value carries no CHANGE_ME substring, so the
+    substring detector leaves it alone (no false positive)."""
+    s = _build(DEPLOY_PROFILE="prod")
+    assert s.is_prod is True
+    assert s.dingtalk_app_secret == "real-dingtalk-app-secret"
+    assert "CHANGE_ME" not in s.dingtalk_login_redirect_uri
+
+
+def test_dev_dingtalk_app_secret_placeholder_warns(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """dev + placeholder app_secret → warn, no raise (AC#2, existing dev
+    warn path extends to the new key)."""
+    caplog.set_level(logging.WARNING, logger="ncmu_backend.config")
+    s = _build(DEPLOY_PROFILE="dev", dingtalk_app_secret="CHANGE_ME")
+    assert s.is_prod is False
+    assert any(
+        "dingtalk_app_secret" in rec.message and "placeholder" in rec.message
+        for rec in caplog.records
+    )
+
+
+def test_dev_redirect_uri_nested_placeholder_warns(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """dev + nested-placeholder redirect URI → warn (substring path), no
+    raise — proves the substring detector also fires the dev warn branch."""
+    caplog.set_level(logging.WARNING, logger="ncmu_backend.config")
+    s = _build(
+        DEPLOY_PROFILE="dev",
+        dingtalk_login_redirect_uri=(
+            "https://CHANGE_ME/api/v1/ncmu/auth/dingtalk/callback"
+        ),
+    )
+    assert s.is_prod is False
+    assert any(
+        "dingtalk_login_redirect_uri" in rec.message
+        and "placeholder" in rec.message
+        for rec in caplog.records
+    )
 
 
 # =============================================================================

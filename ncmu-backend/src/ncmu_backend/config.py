@@ -17,11 +17,20 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 logger = logging.getLogger(__name__)
 
 
-# Sensitive env keys whose CHANGE_ME-prefixed placeholder values are forbidden
-# in prod (raise) and warned in dev. Listed only fields actually declared on
-# `Settings` below — `getattr` would AttributeError otherwise. Prefix-based
-# detection (`startswith`) covers `NCMU_JWT_SECRET`'s padded default
-# `CHANGE_ME_DEV_ONLY_PLACEHOLDER_AT_LEAST_32_BYTES`.
+# Sensitive env keys whose CHANGE_ME placeholder values are forbidden in prod
+# (raise) and warned in dev. The validator reads each via `getattr(self, key)`,
+# so entries are the Settings *attribute* names: the original six are declared
+# in UPPERCASE (field name == attribute name); the two DingTalk-login entries
+# (TASK-PRODVAL-1) are declared snake_case with an UPPERCASE validation_alias,
+# so they are listed by their snake attribute name. Listed only fields actually
+# declared on `Settings` below — `getattr` would AttributeError otherwise.
+#
+# TASK-PRODVAL-1: `dingtalk_app_secret` is a real login dependency
+# (exchange_user_token passes it as the OAuth clientSecret), and
+# `dingtalk_login_redirect_uri` is prod-required config (no real redirect URI
+# → the OAuth round-trip can't complete). Detection uses substring (`in`), not
+# `startswith`, so it also catches the nested placeholder in the redirect URI
+# default `https://CHANGE_ME/api/v1/ncmu/auth/dingtalk/callback`.
 SENSITIVE_KEYS_PROD_REQUIRED: List[str] = [
     "NCMU_JWT_SECRET",
     "DIFY_CONSOLE_API_KEY",
@@ -29,6 +38,9 @@ SENSITIVE_KEYS_PROD_REQUIRED: List[str] = [
     "DIFY_TENANT_ID",
     "FASTGPT_API_KEY",
     "SILICONFLOW_API_KEY",
+    # TASK-PRODVAL-1 — DingTalk login真依赖（snake 属性名，getattr 取值）。
+    "dingtalk_app_secret",          # OAuth clientSecret (login exchange)
+    "dingtalk_login_redirect_uri",  # prod-required config (not a secret)
 ]
 
 
@@ -131,9 +143,9 @@ class Settings(BaseSettings):
     # --- Phase 2D-A2 DingTalk 通讯录同步 (TASK-2DA2S-01) -------------
     # 钉钉企业内部应用凭据 + oapi 基址。app_key/secret/corp_id 默认
     # CHANGE_ME（对齐 DIFY_CONSOLE_API_KEY 占位范式）——真值由 .env 注入；
-    # 本批仅 client 封装 + respx mock 测，不依赖真凭据。oapi_base 可指向
-    # 测试 stub。dingtalk_app_secret 加入 SENSITIVE_KEYS 之外（同步半属
-    # admin-触发后台能力，prod 校验在 2D-A2 收口时统一加）。
+    # 同步半 client 仅 respx mock 测，不依赖真凭据。oapi_base 可指向测试 stub。
+    # TASK-PRODVAL-1：dingtalk_app_secret 已纳入 SENSITIVE_KEYS_PROD_REQUIRED
+    # （登录半 exchange_user_token 拿它当 OAuth clientSecret，是真依赖）。
     dingtalk_app_key: str = Field(
         default="CHANGE_ME",
         validation_alias="DINGTALK_APP_KEY",
@@ -164,10 +176,11 @@ class Settings(BaseSettings):
     # unionId → getbyunionid（oapi，复用同步半 dingtalk_oapi_base）→ 按
     # dingtalk_userid 匹配 NCMU 账号签发 JWT。
     #
-    # dingtalk_login_redirect_uri 默认占位 CHANGE_ME（回调域名待 Boss 审批
-    # 后定 / spec §7）—— 骨架期 respx mock 测不依赖真值；live e2e 前须填真
-    # 回调地址并在钉钉后台「安全设置」配白名单。两个 *_base 默认官方域
-    # （spec §2），测试用 init kwargs 覆盖指向 stub。
+    # dingtalk_login_redirect_uri 默认嵌套占位 https://CHANGE_ME/...（回调域名
+    # 待 Boss 审批后定 / spec §7）—— 骨架期 respx mock 测不依赖真值；live e2e
+    # 前须填真回调地址并在钉钉后台「安全设置」配白名单。TASK-PRODVAL-1：已纳入
+    # SENSITIVE_KEYS_PROD_REQUIRED（prod-required config，子串检测拦嵌套占位）。
+    # 两个 *_base 默认官方域（spec §2），测试用 init kwargs 覆盖指向 stub。
     dingtalk_login_redirect_uri: str = Field(
         default="https://CHANGE_ME/api/v1/ncmu/auth/dingtalk/callback",
         validation_alias="DINGTALK_LOGIN_REDIRECT_URI",
@@ -195,7 +208,13 @@ class Settings(BaseSettings):
         # prod: raise on first hit (avoid noisy multi-error). dev: warn each.
         for key in SENSITIVE_KEYS_PROD_REQUIRED:
             value = getattr(self, key)
-            if not value.startswith("CHANGE_ME"):
+            # Substring (not startswith): the redirect-URI default embeds the
+            # placeholder mid-string (`https://CHANGE_ME/...`), which a prefix
+            # check would miss. All six original placeholders contain CHANGE_ME
+            # too, so this is strictly more inclusive — no regression. A real
+            # prod value containing the literal "CHANGE_ME" substring is
+            # vanishingly unlikely (and would be a self-inflicted false alarm).
+            if "CHANGE_ME" not in value:
                 continue
             if self.is_prod:
                 raise ValueError(f"{key} is placeholder in prod deployment")
