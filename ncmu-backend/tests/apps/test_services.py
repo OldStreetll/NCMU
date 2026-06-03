@@ -797,3 +797,173 @@ async def test_owner_sql_perf_baseline_under_30ms(async_db):
         f"owner SQL perf regression: median {median:.2f}ms > 30ms baseline; "
         f"samples={samples}"
     )
+
+
+# ── TASK-2DA1-GATE — gate 可见性 == 列表可见性（修 over-share / spec §7.1）──────
+# Boss 2026-06-03 决策 B：保留 owner EXISTS 短路（owner 命中即 True / Dify-
+# independent），只把非-owner 的 shared 判定从「raw Dify 共享列表」换成
+# services.list_apps_for_user（owned ∪ 过滤后 shared / 消费 flag）。验收核心 =
+# 「能访问 ⟺ 在该 user 的可见列表里」，flag OFF + flag ON 两态都要对齐。
+
+
+async def test_gate_flag_off_visibility_equals_list_and_fixes_overshare(
+    async_db, http_client, fresh_cache, test_settings,
+):
+    """AC#1 flag OFF：gate 判定 == 列表成员，逐 app_id 对齐。
+
+    关键修复（regression-lock）：非-[KB] 的 raw 共享 App（列表里看不到的）
+    旧实现门禁放行 = over-share；本修后 gate 必须 False。
+    同时验证 [KB] 共享 App 仍可访问（dogfood 不误伤）+ owned 仍可访问。
+    """
+    from ncmu_backend.apps import services
+    from ncmu_backend.auth.permissions import user_can_access_app
+
+    await _seed_owner(async_db, app_id="owner-1", owner_uuid=ZHANGSAN_UUID,
+                      name="私有助手")
+    shared_payload = {
+        "data": [
+            {"id": "kb-1", "name": "[KB]员工手册", "mode": "chat"},
+            {"id": "plain-1", "name": "营销助手", "mode": "chat"},  # 非-[KB] raw 共享
+        ],
+    }
+    with respx.mock(assert_all_called=True) as rx:
+        rx.get(url__regex=r".*/console/api/apps.*").mock(
+            return_value=Response(200, json=shared_payload)
+        )
+        visible = await services.list_apps_for_user(
+            db=async_db, user_id=ZHANGSAN_UUID, http=http_client,
+            cache=fresh_cache, settings=test_settings,
+        )
+        visible_ids = {a["id"] for a in visible}
+
+        # 逐 app_id：gate 判定必须 == 列表成员判定
+        for app_id in ("kb-1", "plain-1", "owner-1", "ghost-never-seen"):
+            ok = await user_can_access_app(
+                db=async_db, user_id=ZHANGSAN_UUID, app_id=app_id,
+                http=http_client, cache=fresh_cache, settings=test_settings,
+            )
+            assert ok == (app_id in visible_ids), (
+                f"gate/list 裂开：app_id={app_id} gate={ok} "
+                f"in_list={app_id in visible_ids} visible={visible_ids}"
+            )
+
+    # 字面断言修复语义（不只是 == 列表，固化预期值）
+    assert visible_ids == {"kb-1", "owner-1"}, (
+        f"flag OFF 可见集应 = [KB]∪owned；got {visible_ids}"
+    )
+    # over-share 已修：plain-1 在列表外 → gate False（旧实现这里会 True）
+    overshare = await user_can_access_app(
+        db=async_db, user_id=ZHANGSAN_UUID, app_id="plain-1",
+        http=http_client, cache=fresh_cache, settings=test_settings,
+    )
+    assert overshare is False, "over-share 未修：非-[KB] raw 共享 App 仍过门禁"
+    # [KB] 共享 App 仍可访问（dogfood 不误伤）
+    kb_ok = await user_can_access_app(
+        db=async_db, user_id=ZHANGSAN_UUID, app_id="kb-1",
+        http=http_client, cache=fresh_cache, settings=test_settings,
+    )
+    assert kb_ok is True, "误伤：现有 [KB] 共享应用应仍可访问"
+
+
+async def test_gate_flag_off_owner_short_circuit_no_dify_call(
+    async_db, http_client, fresh_cache, test_settings,
+):
+    """owner 短路保留：owned App → True 且不调 Dify Console（决策 B 硬要求 /
+    与既有 test_can_access_owner_hit call_count==0 同语义，本批不破）。"""
+    from ncmu_backend.auth.permissions import user_can_access_app
+    await _seed_owner(async_db, app_id="owned-no-dify", owner_uuid=ZHANGSAN_UUID)
+    with respx.mock(assert_all_called=False) as rx:
+        dify_route = rx.get(url__regex=r".*/console/api/apps.*").mock(
+            return_value=Response(200, json={"data": []})
+        )
+        ok = await user_can_access_app(
+            db=async_db, user_id=ZHANGSAN_UUID, app_id="owned-no-dify",
+            http=http_client, cache=fresh_cache, settings=test_settings,
+        )
+    assert ok is True
+    assert dify_route.call_count == 0, (
+        "owner 短路被破坏：owned App 不应触发 Dify Console RTT"
+    )
+
+
+async def test_gate_flag_on_visibility_equals_list_tag_intersection(
+    async_db, http_client, fresh_cache, test_settings,
+):
+    """AC#1 flag ON：gate == 列表，按 user_tags ∩ app_tags 判定。
+
+    含 [KB] 名无 tag 也挡（统一标签控制 / 不走名字特例）；owned 不受 flag 影响。
+    """
+    from ncmu_backend.apps import services
+    from ncmu_backend.auth.permissions import user_can_access_app
+
+    t_hr = await _seed_tag(async_db, name="HR")
+    await _seed_tag(async_db, name="Finance")  # 存在但不绑张三
+    await _bind_user_tag(async_db, user_uuid=ZHANGSAN_UUID, tag_id=t_hr)
+    # has-hr 绑 HR（张三有）→ 可见；has-fin 绑 Finance（张三无）→ 不可见
+    await _bind_app_tag(async_db, app_id="has-hr", tag_id=t_hr)
+    t_fin = await _seed_tag(async_db, name="FinanceBind")
+    await _bind_app_tag(async_db, app_id="has-fin", tag_id=t_fin)
+    # kb-notag：[KB] 名但无 tag → flag ON 必须挡（无名字特例）
+    await _seed_owner(async_db, app_id="owner-on", owner_uuid=ZHANGSAN_UUID,
+                      name="私有")
+
+    settings_on = _routing_on(test_settings)
+    shared_payload = {
+        "data": [
+            {"id": "has-hr", "name": "营销助手", "mode": "chat"},
+            {"id": "has-fin", "name": "财务报表", "mode": "chat"},
+            {"id": "kb-notag", "name": "[KB]员工手册", "mode": "chat"},
+        ],
+    }
+    with respx.mock(assert_all_called=True) as rx:
+        rx.get(url__regex=r".*/console/api/apps.*").mock(
+            return_value=Response(200, json=shared_payload)
+        )
+        visible = await services.list_apps_for_user(
+            db=async_db, user_id=ZHANGSAN_UUID, http=http_client,
+            cache=fresh_cache, settings=settings_on,
+        )
+        visible_ids = {a["id"] for a in visible}
+
+        for app_id in ("has-hr", "has-fin", "kb-notag", "owner-on", "ghost"):
+            ok = await user_can_access_app(
+                db=async_db, user_id=ZHANGSAN_UUID, app_id=app_id,
+                http=http_client, cache=fresh_cache, settings=settings_on,
+            )
+            assert ok == (app_id in visible_ids), (
+                f"flag ON gate/list 裂开：app_id={app_id} gate={ok} "
+                f"in_list={app_id in visible_ids} visible={visible_ids}"
+            )
+
+    assert visible_ids == {"has-hr", "owner-on"}, (
+        f"flag ON 可见集应 = tag 交集 ∪ owned；got {visible_ids}"
+    )
+    # [KB] 名无 tag 必挡
+    kb_blocked = await user_can_access_app(
+        db=async_db, user_id=ZHANGSAN_UUID, app_id="kb-notag",
+        http=http_client, cache=fresh_cache, settings=settings_on,
+    )
+    assert kb_blocked is False, "flag ON：[KB] 名 App 无匹配 tag 必须挡（统一标签控制）"
+
+
+async def test_gate_flag_on_owner_unaffected_no_tag_no_dify(
+    async_db, http_client, fresh_cache, test_settings,
+):
+    """flag ON：owner 路径不受 flag 影响——user 无任何 tag，owned App 仍 True
+    且不调 Dify（owner 短路在 flag ON 下同样保留）。"""
+    from ncmu_backend.auth.permissions import user_can_access_app
+    await _seed_owner(async_db, app_id="owner-on-notag", owner_uuid=ZHANGSAN_UUID,
+                      name="私有助手")
+    settings_on = _routing_on(test_settings)
+    with respx.mock(assert_all_called=False) as rx:
+        dify_route = rx.get(url__regex=r".*/console/api/apps.*").mock(
+            return_value=Response(200, json={"data": []})
+        )
+        ok = await user_can_access_app(
+            db=async_db, user_id=ZHANGSAN_UUID, app_id="owner-on-notag",
+            http=http_client, cache=fresh_cache, settings=settings_on,
+        )
+    assert ok is True
+    assert dify_route.call_count == 0, (
+        "flag ON 下 owner 短路应保留：owned App 不应触发 Dify Console RTT"
+    )
