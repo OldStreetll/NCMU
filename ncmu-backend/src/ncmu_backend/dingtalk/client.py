@@ -178,3 +178,98 @@ async def list_department_users(
         else:
             break
     return users
+
+
+# --------------------------------------------------------------------- #
+# OAuth2 扫码登录 —— TASK-LOGIN-1
+# --------------------------------------------------------------------- #
+# 登录链路用钉钉**新版 v1.0 API**（api.dingtalk.com / oauth_api_base），与同步
+# 半的 oapi（oapi.dingtalk.com，errcode≠0 风格）不同：v1.0 成功返 2xx + JSON，
+# 失败返 **HTTP 非 2xx** + body ``{"code": "<str>", "message": "..."}``（无
+# errcode 字段）。故这两步用 :func:`_check_v1_response` 按 HTTP status 判定，失败
+# 统一抛 :class:`DingTalkApiError`（spec §3「任何链路失败 → 拒绝，复用
+# DingTalkApiError」），errcode 字段填 HTTP status 便于 caller 归因。
+# 第三步 getbyunionid 仍是老 oapi（errcode 风格），复用 :func:`_check_errcode`。
+
+
+def _check_v1_response(resp: httpx.Response) -> dict[str, Any]:
+    """v1.0 API（api.dingtalk.com）统一错误检查。
+
+    HTTP 非 2xx → 抛 DingTalkApiError(errcode=status, errmsg=body.code/message)；
+    2xx → 返回解析后的 JSON dict。绝不静默放行非 2xx。
+    """
+    if resp.is_success:
+        return resp.json()
+    # 失败体可能不是 JSON（网关层错误等），防御性解析。
+    try:
+        body = resp.json()
+        detail = body.get("message") or body.get("code") or resp.text
+    except Exception:
+        detail = resp.text
+    raise DingTalkApiError(resp.status_code, f"dingtalk v1.0 api: {detail}")
+
+
+async def exchange_user_token(
+    http: httpx.AsyncClient, settings: Settings, code: str,
+) -> str:
+    """① code → userAccessToken（用户身份 token，非企业 token）。
+
+    ``POST {oauth_api_base}/v1.0/oauth2/userAccessToken``
+    body ``{clientId, clientSecret, code, grantType:"authorization_code"}``
+    → ``{accessToken, expireIn, ...}``。失败抛 DingTalkApiError。
+    """
+    resp = await http.post(
+        f"{settings.dingtalk_oauth_api_base}/v1.0/oauth2/userAccessToken",
+        json={
+            "clientId": settings.dingtalk_app_key,
+            "clientSecret": settings.dingtalk_app_secret,
+            "code": code,
+            "grantType": "authorization_code",
+        },
+    )
+    payload = _check_v1_response(resp)
+    token = payload.get("accessToken")
+    if not token:
+        raise DingTalkApiError(0, "userAccessToken response missing accessToken")
+    return token
+
+
+async def get_login_userinfo(
+    http: httpx.AsyncClient, settings: Settings, user_token: str,
+) -> str:
+    """② userAccessToken → 当前登录用户 unionId。
+
+    ``GET {oauth_api_base}/v1.0/contact/users/me`` header
+    ``x-acs-dingtalk-access-token: {user_token}`` → ``{unionId, openId, nick}``。
+    返回 ``unionId``。失败 / 缺 unionId 抛 DingTalkApiError（绝不返回空冒充）。
+    """
+    resp = await http.get(
+        f"{settings.dingtalk_oauth_api_base}/v1.0/contact/users/me",
+        headers={"x-acs-dingtalk-access-token": user_token},
+    )
+    payload = _check_v1_response(resp)
+    union_id = payload.get("unionId")
+    if not union_id:
+        raise DingTalkApiError(0, "contact/users/me response missing unionId")
+    return union_id
+
+
+async def get_userid_by_unionid(
+    http: httpx.AsyncClient, settings: Settings, corp_token: str, unionid: str,
+) -> str:
+    """③ unionId → 企业 userid（用企业 access_token，老 oapi errcode 风格）。
+
+    ``POST {oapi_base}/topapi/user/getbyunionid?access_token={corp_token}``
+    body ``{"unionid": unionid}`` → ``{errcode, result:{userid}}``。
+    errcode≠0 由 _check_errcode 抛 DingTalkApiError；缺 userid 亦抛（绝不放行）。
+    """
+    resp = await http.post(
+        f"{settings.dingtalk_oapi_base}/topapi/user/getbyunionid",
+        params={"access_token": corp_token},
+        json={"unionid": unionid},
+    )
+    payload = _check_errcode(resp.json())
+    userid = (payload.get("result") or {}).get("userid")
+    if not userid:
+        raise DingTalkApiError(0, "getbyunionid response missing result.userid")
+    return userid

@@ -158,6 +158,29 @@ class Settings(BaseSettings):
         validation_alias="DINGTALK_SYNC_ROOT_DEPT_ID",
     )
 
+    # --- Phase 2D-A2 DingTalk 扫码登录 (TASK-LOGIN-1) ----------------
+    # 登录走钉钉 OAuth2：前端跳 auth_base 授权页 → 钉钉带 code 回调
+    # redirect_uri → 后端 code→userAccessToken（oauth_api_base）→ /me 取
+    # unionId → getbyunionid（oapi，复用同步半 dingtalk_oapi_base）→ 按
+    # dingtalk_userid 匹配 NCMU 账号签发 JWT。
+    #
+    # dingtalk_login_redirect_uri 默认占位 CHANGE_ME（回调域名待 Boss 审批
+    # 后定 / spec §7）—— 骨架期 respx mock 测不依赖真值；live e2e 前须填真
+    # 回调地址并在钉钉后台「安全设置」配白名单。两个 *_base 默认官方域
+    # （spec §2），测试用 init kwargs 覆盖指向 stub。
+    dingtalk_login_redirect_uri: str = Field(
+        default="https://CHANGE_ME/api/v1/ncmu/auth/dingtalk/callback",
+        validation_alias="DINGTALK_LOGIN_REDIRECT_URI",
+    )
+    dingtalk_auth_base: str = Field(
+        default="https://login.dingtalk.com",
+        validation_alias="DINGTALK_AUTH_BASE",
+    )
+    dingtalk_oauth_api_base: str = Field(
+        default="https://api.dingtalk.com",
+        validation_alias="DINGTALK_OAUTH_API_BASE",
+    )
+
     @property
     def admin_user_id_set(self) -> set[str]:
         """Parsed NCMU_ADMIN_USER_IDS as a set, lower-cased."""
