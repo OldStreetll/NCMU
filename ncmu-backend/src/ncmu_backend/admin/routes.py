@@ -35,7 +35,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ncmu_backend.apps.dify_console_client import DifyConsoleClient
 from ncmu_backend.apps.routes import get_dify_console_client
 from ncmu_backend.auth.deps import CurrentUser, require_admin
-from ncmu_backend.db.models import DifyApp, PersonalKbApplication, User
+from ncmu_backend.db.models import DifyApp, PersonalKbApplication, Tag, User
 from ncmu_backend.db.session import get_db
 from ncmu_backend.deps import Settings, get_settings
 from ncmu_backend.main import get_dify_client
@@ -51,16 +51,17 @@ class _AdminStatsOut(BaseModel):
     Counts come from the live DB at request time; no caching (call
     volume is one-per-page-load by a single admin operator).
 
-    tag_count is wired to 0 on baseline 0008 — the Tag/AppTag/UserTag
-    tables are created by PE-05's alembic 0009. Once PE-05 lands, the
-    placeholder is swapped for a real `SELECT count(*) FROM tags`.
+    tag_count is a real `SELECT count(*) FROM tags` (TASK-MON-1). It was a
+    `0` placeholder on the PE-04 baseline (the Tag/AppTag/UserTag tables
+    only landed with PE-05's alembic 0009); MON-1 wired the live count
+    once the table existed.
 
     Kept inline here (instead of schemas/admin.py) to stay within
     TASK-PE-04's file-range; the underscore prefix marks it as a
     route-local model not part of the schemas/admin public surface.
     """
 
-    tag_count: int = Field(description="标签总数（PE-05 落地前固定为 0）")
+    tag_count: int = Field(description="tags 表总行数（TASK-MON-1 接真查询）")
     user_count: int = Field(description="is_active=true 的用户数")
     app_count: int = Field(description="dify_apps 缓存表行数（同步自 Dify Console）")
     pending_personal_kb_count: int = Field(
@@ -202,11 +203,11 @@ async def get_admin_stats(
     external_kb_config_count = await db.scalar(
         text("SELECT count(*) FROM dify_external_kb_configs")
     )
-    # TODO PE-05: replace 0 with `SELECT count(*) FROM tags` once
-    # alembic 0009 lands the Tag table.
-    tag_count = 0
+    # TASK-MON-1: Tag table landed (PE-05 alembic 0009) — wire the real
+    # count, replacing the PE-04 baseline `tag_count = 0` placeholder.
+    tag_count = await db.scalar(select(func.count()).select_from(Tag))
     return _AdminStatsOut(
-        tag_count=tag_count,
+        tag_count=tag_count or 0,
         user_count=user_count or 0,
         app_count=app_count or 0,
         pending_personal_kb_count=pending_personal_kb_count or 0,

@@ -254,6 +254,13 @@ app.include_router(_admin_dsl_routes.router)
 # recurses depth 1). Included AFTER admin.dsl per the route-order note above.
 from ncmu_backend.admin.apps import routes as _admin_apps_routes
 app.include_router(_admin_apps_routes.router)
+# TASK-MON-1: ``admin.monitoring.routes`` lives at depth 2
+# (``ncmu_backend.admin.monitoring.routes``) — same manual-include idiom as
+# the PE-05/-06/-07/-10 admin sub-packages above (auto-discovery only
+# recurses depth 1). Static path ``/admin/monitoring`` — no param-route
+# collision, so registration order is unconstrained.
+from ncmu_backend.admin.monitoring import routes as _admin_monitoring_routes
+app.include_router(_admin_monitoring_routes.router)
 
 
 @app.get("/healthz", tags=["meta"])
