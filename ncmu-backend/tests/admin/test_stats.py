@@ -8,8 +8,9 @@ Contract (plan §3 PE-04 line 695-754):
 Counts on the baseline ephemeral DB seed:
   - dev_users.sql seeds 5 users (张三/李四/王五/赵六/钱七 / all is_active=True)
   - dify_apps, personal_kb_applications, dify_external_kb_configs are empty
-  - Tag table doesn't exist on baseline 0008 (PE-05 alembic 0009 to add) →
-    tag_count is wired to 0 (placeholder) until PE-05 lands
+  - tags table starts empty; tag_count is a real `SELECT count(*) FROM tags`
+    (TASK-MON-1 wired it from the old hard-coded 0 placeholder), so a seeded
+    Tag row must be reflected in the count
 
 Field-level assertions (守 memory feedback_pre_existing_error_strict_validation
 + feedback_tdd_mock_vs_real_api SOP 真验三件套). All counts are queried
@@ -53,10 +54,18 @@ async def test_get_admin_stats_returns_5_int_fields(app_client, jwt_token):
 # --------------------------------------------------------------------- #
 # (2) field-level — baseline ephemeral DB seed values
 # --------------------------------------------------------------------- #
-async def test_get_admin_stats_baseline_seed_values(app_client, jwt_token):
-    """On fresh migrated DB + dev_users.sql seed (5 users / 0 others)
-    the stats endpoint must return exact counts. Guards against silent
-    SQL drift (e.g. wrong table name, missing WHERE clause)."""
+async def test_get_admin_stats_baseline_seed_values(app_client, async_db, jwt_token):
+    """On fresh migrated DB + dev_users.sql seed (5 users / 0 apps·kb·external)
+    plus 1 seeded Tag, the stats endpoint must return exact counts. Guards
+    against silent SQL drift (e.g. wrong table name, missing WHERE clause).
+    The seeded Tag proves ``tag_count`` is a real ``count(Tag)`` (TASK-MON-1),
+    not the old hard-coded 0 placeholder."""
+    await async_db.execute(
+        text("INSERT INTO tags (id, name) VALUES (:id, :n)"),
+        {"id": str(uuid.uuid4()), "n": "stats-baseline-seed-tag"},
+    )
+    await async_db.commit()
+
     resp = await app_client.get(
         "/api/v1/ncmu/admin/stats",
         headers={"Authorization": f"Bearer {jwt_token}"},
@@ -67,7 +76,7 @@ async def test_get_admin_stats_baseline_seed_values(app_client, jwt_token):
     assert body["app_count"] == 0, body
     assert body["pending_personal_kb_count"] == 0, body
     assert body["external_kb_config_count"] == 0, body
-    assert body["tag_count"] == 0, body  # placeholder until PE-05 lands Tag table
+    assert body["tag_count"] == 1, body  # real count(Tag): the 1 seeded tag above
 
 
 # --------------------------------------------------------------------- #

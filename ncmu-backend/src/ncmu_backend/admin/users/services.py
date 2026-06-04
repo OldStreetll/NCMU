@@ -28,6 +28,6 @@ def to_user_out(user: User, settings: Settings) -> UserOut:
         dingtalk_userid=user.dingtalk_userid,
         dept_path=user.dept_path,
         is_active=user.is_active,
-        is_admin=str(user.id).lower() in settings.admin_user_id_set,
+        is_admin=settings.derive_is_admin(user.id),
         tags=[],
     )
