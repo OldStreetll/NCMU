@@ -4,6 +4,7 @@ import {
   AppstoreOutlined,
   BookOutlined,
   CloudUploadOutlined,
+  DashboardOutlined,
   DownloadOutlined,
   HomeOutlined,
   TagOutlined,
@@ -39,6 +40,11 @@ export function AdminLayout({ children }: AdminLayoutProps) {
 
   const menuItems = [
     { key: "/admin", icon: <HomeOutlined />, label: <Link to="/admin">首页</Link> },
+    {
+      key: "/admin/monitoring",
+      icon: <DashboardOutlined />,
+      label: <Link to="/admin/monitoring">监控</Link>,
+    },
     {
       key: "/admin/tags",
       icon: <TagOutlined />,

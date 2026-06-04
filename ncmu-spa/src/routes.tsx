@@ -48,6 +48,9 @@ const AdminAppsPage = lazy(() => import("@/pages/AdminAppsPage"));
 const AdminDslExportPage = lazy(() => import("@/pages/AdminDslExportPage"));
 // TASK-PE-11 (Phase 2E Batch 4): admin DSL import page (YAML/ZIP drag-upload).
 const AdminDslImportPage = lazy(() => import("@/pages/AdminDslImportPage"));
+// TASK-MON-2 (Phase 2 监控): admin monitoring snapshot page (业务运营 / 钉钉集成),
+// wired to GET /admin/monitoring (MON-1 contract).
+const AdminMonitoringPage = lazy(() => import("@/pages/AdminMonitoringPage"));
 
 const lazyFallback = (
   <div style={{ display: "flex", justifyContent: "center", padding: 48 }}>
@@ -124,6 +127,10 @@ export function AppRoutes() {
           and require requiredRole="admin". /admin/kb-configs was previously
           unguarded (pre-PE-01 bug); RoleGuard now closes that gap. */}
       <Route path="/admin" element={adminRoute(<AdminHomePage />)} />
+      <Route
+        path="/admin/monitoring"
+        element={adminRoute(<AdminMonitoringPage />)}
+      />
       <Route
         path="/admin/kb-configs"
         element={adminRoute(<AdminKbConfigsPage />)}
