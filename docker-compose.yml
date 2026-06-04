@@ -796,8 +796,15 @@ services:
       TAGS_ROUTING_ENABLED: ${TAGS_ROUTING_ENABLED:-false}
       PERSONAL_KB_STORAGE_BACKEND: ${PERSONAL_KB_STORAGE_BACKEND:-local_fs}
       PERSONAL_KB_STORAGE_ROOT: ${PERSONAL_KB_STORAGE_ROOT:-/var/lib/ncmu/personal-kb}
+      # docker-internal REDIS_URL — overrides whatever the host-side .env
+      # has (which may use localhost for redis-cli convenience). Aligns
+      # with the config.py default and pins NCMU to DB 0 (Dify=DB1 /
+      # FastGPT=DB2). ncmu-redis runs without requirepass → no password.
+      REDIS_URL: redis://${REDIS_HOST:-redis}:${REDIS_PORT:-6379}/0
     depends_on:
       pg-ncmu:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     healthcheck:
       # python:3.11-slim ships no curl. Use python's stdlib http.client
