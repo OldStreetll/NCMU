@@ -12,11 +12,26 @@ verbatim in the AC checklist; do not rename without updating spec/plan.
 from __future__ import annotations
 
 import pytest
+from alembic.config import Config
+from alembic.script import ScriptDirectory
 from sqlalchemy import MetaData, create_engine, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from conftest import _run_alembic
+from conftest import _REPO_ROOT, _run_alembic
+
+
+def _current_head_revision() -> str:
+    """Return alembic's current head revision (revision-agnostic).
+
+    Reading the head from the migration scripts keeps the upgrade-head
+    assertion honest without hard-coding a version number that goes stale
+    every time a new migration lands (0008 → 0011 → …). script_location is
+    set absolutely so the lookup is independent of the test's cwd.
+    """
+    cfg = Config(str(_REPO_ROOT / "alembic.ini"))
+    cfg.set_main_option("script_location", str(_REPO_ROOT / "alembic"))
+    return ScriptDirectory.from_config(cfg).get_current_head()
 
 
 PERSONAL_KB_TABLES = {
@@ -96,10 +111,15 @@ def test_upgrade_creates_tables(db_session):
         f"actual public schema: {sorted(tables)}"
     )
 
+    # Revision-agnostic: assert the fixture's `upgrade head` actually left the
+    # DB at the migration tree's real head, whatever number that currently is.
+    # (Was a hard-coded ``== "0008"`` which went stale once 0009/0010/0011
+    # landed — the table/index assertions above are the real Phase 2C coverage.)
     version = db_session.execute(
         text("SELECT version_num FROM alembic_version")
     ).scalar_one()
-    assert version == "0008", f"expected alembic_version=0008, got {version}"
+    head = _current_head_revision()
+    assert version == head, f"expected alembic_version={head} (head), got {version}"
 
     # AC#6: 4 named indexes exist
     indexes = _list_indexes(db_session)
