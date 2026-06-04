@@ -94,7 +94,7 @@ async def dev_login(
     # truth, per r3 I-INDEP2-1) and surface it in both the JWT claim (for
     # SPA display sync) and the UserOut payload (frontend AuthUser.is_admin
     # is hydrated from this, NOT by decoding the JWT — r3 I-INDEP2-2).
-    is_admin = str(user.id).lower() in settings.admin_user_id_set
+    is_admin = settings.derive_is_admin(user.id)
     jwt_str, exp = sign_jwt(
         str(user.id),
         user.name,
@@ -250,6 +250,6 @@ async def dingtalk_login_callback(
 
     # is_admin 与 dev-login 同源（settings.admin_user_id_set），surface 给 SPA
     # （display state；authorization source-of-truth 仍在 auth/deps.py）。
-    is_admin = str(user.id).lower() in settings.admin_user_id_set
+    is_admin = settings.derive_is_admin(user.id)
     user_out = UserOut.model_validate(user).model_copy(update={"is_admin": is_admin})
     return DevLoginResponse(jwt=jwt_str, user=user_out, expires_at=exp)
