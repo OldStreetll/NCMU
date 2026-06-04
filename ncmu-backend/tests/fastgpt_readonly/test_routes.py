@@ -64,9 +64,15 @@ def _make_mock_fastgpt_handler(scenarios: dict[str, httpx.Response]):
     def handler(request: httpx.Request) -> httpx.Response:
         url = str(request.url)
         if "/api/core/dataset/collection/list" in url:
-            ds = request.url.params.get("datasetId", "")
+            # Real FastGPT v4.14.10.2: list is POST + JSON body — datasetId
+            # travels in the body, not the query string (实测对账 2026-06-04).
+            body = json.loads(request.content) if request.content else {}
+            ds = body.get("datasetId", "")
             key = f"list:{ds}"
-            return scenarios.get(key, scenarios.get("list:*", httpx.Response(200, json={"data": {"list": []}})))
+            return scenarios.get(
+                key,
+                scenarios.get("list:*", httpx.Response(200, json={"data": {"data": [], "total": 0}})),
+            )
         if "/api/core/dataset/collection/detail" in url:
             cid = request.url.params.get("id", "")
             return scenarios.get(f"detail:{cid}", httpx.Response(200, json={"data": {}}))
@@ -130,9 +136,9 @@ async def test_list_kb_files_returns_normalised_file_meta(fastgpt_route_client, 
     client, db, install_mock = fastgpt_route_client
     await _seed_app_with_kb(db, app_id="app-A", dataset_id="ds-A")
     install_mock({
-        "list:ds-A": httpx.Response(200, json={"data": {"list": [
+        "list:ds-A": httpx.Response(200, json={"data": {"data": [
             {"_id": "coll-A", "name": "员工守则.pdf"},
-        ]}}),
+        ], "total": 1}}),
         "detail:coll-A": httpx.Response(200, json={"data": {
             "_id": "coll-A",
             "name": "员工守则.pdf",
@@ -168,9 +174,9 @@ async def test_download_kb_file_streams_with_correct_headers(
     client, db, install_mock = fastgpt_route_client
     await _seed_app_with_kb(db, app_id="app-B", dataset_id="ds-B")
     install_mock({
-        "list:ds-B": httpx.Response(200, json={"data": {"list": [
+        "list:ds-B": httpx.Response(200, json={"data": {"data": [
             {"_id": "coll-B", "name": "policy.pdf"},
-        ]}}),
+        ], "total": 1}}),
         "detail:coll-B": httpx.Response(200, json={"data": {
             "file": {
                 "fileId": "f-policy",
@@ -245,9 +251,9 @@ async def test_download_rejects_file_id_outside_apps_bound_datasets(
     client, db, install_mock = fastgpt_route_client
     await _seed_app_with_kb(db, app_id="app-C", dataset_id="ds-C")
     install_mock({
-        "list:ds-C": httpx.Response(200, json={"data": {"list": [
+        "list:ds-C": httpx.Response(200, json={"data": {"data": [
             {"_id": "coll-C", "name": "only-file.pdf"},
-        ]}}),
+        ], "total": 1}}),
         "detail:coll-C": httpx.Response(200, json={"data": {
             "file": {
                 "fileId": "f-legit",

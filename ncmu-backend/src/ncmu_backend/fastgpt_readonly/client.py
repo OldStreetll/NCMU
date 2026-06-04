@@ -1,25 +1,43 @@
 """FastGPT v4.14.x read-only client (errata-13 §2.2 + plan §4.3 AC#1-2).
 
-Hard-coded to GET-only — any write-method httpx call would violate
-baseline §3.1 and trip the AC#1 grep self-check (the pattern is the
-exact regex documented in plan §4.3 AC#1; it must match nothing under
-``fastgpt_readonly/``).
+Read-only by contract — this client performs NO create/update/delete on
+FastGPT (no dataset/collection/file mutation). ``read-only`` is a
+*semantic* guarantee, not an HTTP-method one: the real FastGPT
+v4.14.10.2 models "list collections" as **POST + JSON body** (the body
+just carries query params — datasetId/offset/pageSize), so
+``list_collections`` and ``health_check`` use POST against
+``/api/core/dataset/collection/list``. ``get_collection_files``
+(collection/detail) and ``download_file`` (common/file/read) stay GET.
+
+  ⚠️ FastGPT v4.14.10.2 list 用 POST 实测对账 (2026-06-04, TASK-KBFIX-1).
+  The earlier "hard-coded GET-only" baseline (client.py 旧版 §3.1) was
+  built on an INCORRECT API assumption — real FastGPT returns HTTP 500
+  ``{"code":501002,"unExistDataset"}`` to GET collection/list. Do NOT
+  "restore" GET on the strength of "read == GET"; read-only here means
+  no writes, and POST-with-body is just how FastGPT transports the query.
 
 Auth: ``Authorization: Bearer {FASTGPT_API_KEY}`` (plan AC#2 / reuses
 the same env var as kb-adapter — baseline §3.1 doesn't grant a new key).
 
-Mock-vs-real grounding (守 feedback_tdd_mock_vs_real_api 第 12 次同型):
-- ``list_collections`` response shape ``{"data": {"list": [{"_id", "name", ...}]}}``
-  is grounded against kb-adapter ``src/kb_adapter/translator.py:40-48`` (真代码).
-- ``get_collection_files`` + ``download_file`` shapes follow FastGPT
-  v4.14.x convention; TASK-PC4 真容器 E2E reconciles against live upstream.
+Mock-vs-real grounding (守 feedback_tdd_mock_vs_real_api 第 13 次同型):
+- ``list_collections`` POST response shape is
+  ``{"code":200, "data": {"data": [{"_id","name","type","fileId"?}], "total": N}}``
+  — grounded against real FastGPT v4.14.10.2 (2026-06-04 实测对账). The old
+  ``data.list`` mock shape never matched the live API (hence the panel bug:
+  unit tests green, real KB panel showed 暂无文档).
+- ``get_collection_files`` (collection/detail GET ?id=) returns a single
+  collection object; a virtual collection (no separate file) falls back to
+  using the collection itself as the pseudo-file — 实测 200, unchanged.
 
-Health check (plan §4.3 AC#6 / [INTENT-CHECK T2] path A):
+Health check (plan §4.3 AC#6):
 - v4.14.x has no dedicated public health endpoint
   (``/api/common/system/version`` returns Next.js 404 HTML).
-- We probe ``/api/core/dataset/collection/list?datasetId=__healthcheck__``
-  instead — any non-404 + non-connect-error response means the service is
-  up (the auth-protected handler executed; we ignore the auth result).
+- We probe ``/api/core/dataset/collection/list`` via **POST** with body
+  ``{"datasetId":"__healthcheck__","offset":0,"pageSize":1}`` — any
+  non-404 + non-connect-error response means the service is up: a real
+  handler executed (even a 500 ``unExistDataset`` for the bogus dataset
+  proves reachability). 404 = endpoint missing (version mismatch) →
+  unreachable; connect/timeout → unreachable.
 """
 from __future__ import annotations
 
@@ -40,6 +58,12 @@ log = logging.getLogger("ncmu_backend.fastgpt_readonly.client")
 
 HEALTHCHECK_DATASET_ID = "__healthcheck__"
 DEFAULT_TIMEOUT_S = 10.0
+# Page size for the POST collection/list pagination loop. FastGPT caps
+# pageSize server-side; 100 keeps round-trips low for typical datasets.
+LIST_PAGE_SIZE = 100
+# Defensive ceiling so a misbehaving upstream (e.g. total never satisfied)
+# can't spin the pagination loop forever. 100 pages * 100 = 10k collections.
+_LIST_MAX_PAGES = 100
 
 # Module-level metadata cache shared by every FastGPTReadOnlyClient
 # instance in the process — plan §4.3 AC#4 / spec §3.2 Q5-B. Keeping it
@@ -101,6 +125,19 @@ class FastGPTReadOnlyClient:
         except httpx.HTTPError as exc:
             raise FastGPTUnreachable(f"transport error: {exc}") from exc
 
+    async def _post(self, path: str, json_body: Optional[dict] = None) -> httpx.Response:
+        # Mirror of ``_get`` for FastGPT's POST-with-body read endpoints.
+        # FastGPT v4.14.10.2 models "list collections" as POST + JSON body
+        # (datasetId/offset/pageSize) — 实测对账 2026-06-04 (TASK-KBFIX-1).
+        # This is still a READ: no create/update/delete is ever issued.
+        url = f"{self._base_url}{path}"
+        try:
+            return await self._client().post(url, json=json_body, headers=self._headers)
+        except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout) as exc:
+            raise FastGPTUnreachable(f"{type(exc).__name__}: {exc}") from exc
+        except httpx.HTTPError as exc:
+            raise FastGPTUnreachable(f"transport error: {exc}") from exc
+
     def _raise_for_status(self, resp: httpx.Response, *, on_404_invalidate_key: Optional[str] = None) -> None:
         if resp.status_code < 400:
             return
@@ -115,28 +152,73 @@ class FastGPTReadOnlyClient:
         cache_key = f"list:{dataset_id}"
 
         async def _fetch() -> list[CollectionMeta]:
-            resp = await self._get(
-                "/api/core/dataset/collection/list",
-                params={"datasetId": dataset_id},
-            )
-            try:
-                self._raise_for_status(resp, on_404_invalidate_key=cache_key)
-            except FastGPTNotFound:
-                _metadata_cache.invalidate(cache_key)
-                raise
-            payload = resp.json()
-            items = (payload.get("data") or {}).get("list") or []
+            # POST /api/core/dataset/collection/list with a JSON body — real
+            # FastGPT v4.14.10.2 shape (实测对账 2026-06-04). The response
+            # list lives at ``data.data`` (NOT ``data.list``) and is paged;
+            # walk every page so a dataset with > pageSize collections is
+            # returned in full, not just the first page.
             out: list[CollectionMeta] = []
-            for item in items:
-                cid = item.get("_id") or item.get("id")
-                if not cid:
-                    continue
-                out.append(
-                    CollectionMeta(
-                        collection_id=str(cid),
-                        name=str(item.get("name") or ""),
-                        file_id=item.get("fileId") or item.get("file_id"),
+            offset = 0
+            for _ in range(_LIST_MAX_PAGES):
+                resp = await self._post(
+                    "/api/core/dataset/collection/list",
+                    json_body={
+                        "datasetId": dataset_id,
+                        "offset": offset,
+                        "pageSize": LIST_PAGE_SIZE,
+                    },
+                )
+                try:
+                    self._raise_for_status(resp, on_404_invalidate_key=cache_key)
+                except FastGPTNotFound:
+                    _metadata_cache.invalidate(cache_key)
+                    raise
+                payload = resp.json()
+                data = payload.get("data") or {}
+                items = data.get("data") or []
+                for item in items:
+                    cid = item.get("_id") or item.get("id")
+                    if not cid:
+                        continue
+                    out.append(
+                        CollectionMeta(
+                            collection_id=str(cid),
+                            name=str(item.get("name") or ""),
+                            file_id=item.get("fileId") or item.get("file_id"),
+                        )
                     )
+                offset += len(items)
+                # ``total`` may be absent or a non-numeric upstream value
+                # (e.g. ""). Coerce defensively: anything non-numeric is
+                # treated as "unknown total" and we rely on the empty/short
+                # -page terminators below (which guarantee termination
+                # regardless). Real FastGPT returns an int — this is pure
+                # robustness, never raise ValueError on a junk total.
+                raw_total = data.get("total")
+                try:
+                    total = int(raw_total) if raw_total is not None else None
+                except (TypeError, ValueError):
+                    total = None
+                # Stop when: empty page (nothing left), short page (last
+                # page), or we've reached the reported total. Any one is a
+                # sufficient terminator — total may be absent, so the
+                # empty/short-page checks guarantee termination regardless.
+                if (
+                    not items
+                    or len(items) < LIST_PAGE_SIZE
+                    or (total is not None and offset >= total)
+                ):
+                    break
+            else:
+                # for-loop exhausted _LIST_MAX_PAGES without a natural
+                # terminator (upstream kept returning full pages). Do NOT
+                # silently return a truncated list — surface it so a caller
+                # isn't misled into thinking it got every collection
+                # (no-silent-caps; REWORK-KBFIX-1-INDEP ①).
+                log.warning(
+                    "list_collections hit _LIST_MAX_PAGES=%d cap; collection "
+                    "list may be truncated dataset_id=%s pages=%d collected=%d",
+                    _LIST_MAX_PAGES, dataset_id, _LIST_MAX_PAGES, len(out),
                 )
             return out
 
@@ -228,23 +310,26 @@ class FastGPTReadOnlyClient:
             await cm.__aexit__(None, None, None)
 
     async def health_check(self) -> dict:
-        """Reachability probe (plan AC#6 / INTENT-CHECK T2 path A).
+        """Reachability probe (plan AC#6).
 
-        Returns ``{"alive": True, "status_code": int}`` when the service
-        responds with anything other than 404 (a real handler executed —
-        even the auth-rejection 500+JSON counts). 404 / connect errors /
-        timeouts raise ``FastGPTUnreachable``.
+        POSTs the bogus ``__healthcheck__`` dataset to collection/list
+        (same endpoint + method as ``list_collections`` — 实测对账
+        2026-06-04). Returns ``{"alive": True, "status_code": int}`` when
+        the service responds with anything other than 404: a real handler
+        executed — even a 500 ``{"code":501002,"unExistDataset"}`` for the
+        bogus dataset proves the service is **reachable but the dataset is
+        absent** (exactly the distinction we want). 404 means the endpoint
+        is missing (FastGPT version mismatch); connect errors / timeouts
+        arrive as ``FastGPTUnreachable`` from ``_post``. Both → unreachable.
         """
-        try:
-            resp = await self._client().get(
-                f"{self._base_url}/api/core/dataset/collection/list",
-                params={"datasetId": HEALTHCHECK_DATASET_ID},
-                headers=self._headers,
-            )
-        except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout) as exc:
-            raise FastGPTUnreachable(f"{type(exc).__name__}: {exc}") from exc
-        except httpx.HTTPError as exc:
-            raise FastGPTUnreachable(f"transport error: {exc}") from exc
+        resp = await self._post(
+            "/api/core/dataset/collection/list",
+            json_body={
+                "datasetId": HEALTHCHECK_DATASET_ID,
+                "offset": 0,
+                "pageSize": 1,
+            },
+        )
         if resp.status_code == 404:
             raise FastGPTUnreachable(
                 f"HTTP 404 — FastGPT endpoint missing (v4.x mismatch?): {resp.text[:200]!r}"

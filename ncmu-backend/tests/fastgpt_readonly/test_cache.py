@@ -171,7 +171,18 @@ def test_cache_module_does_not_reference_streaming_method_name():
 
 
 def test_fastgpt_readonly_package_has_no_write_method_calls():
-    """Plan §4.3 AC#1 字面 grep guard: no httpx.{post,put,delete,patch}.
+    """Plan §4.3 AC#1 字面 grep guard: no module-level httpx.{post,put,delete,patch}.
+
+    Scope note (TASK-KBFIX-1, 2026-06-04): this guard matches the
+    *module-level* convenience helpers ``httpx.post(...)`` etc. — it does
+    NOT match instance calls ``self._client().post(...)``. That is
+    deliberate: ``client._post`` legitimately issues a **POST** to
+    ``/api/core/dataset/collection/list`` because real FastGPT v4.14.10.2
+    models "list collections" as POST + JSON body (实测对账 2026-06-04). That
+    is a READ, not a write — ``read-only`` here means no create/update/delete
+    (download/collection-detail stay GET). Do NOT "tighten" this regex to ban
+    instance ``.post`` and revert list_collections to GET: GET collection/list
+    returns HTTP 500 ``unExistDataset`` on the live API (the original panel bug).
 
     Co-located with cache tests because it's a static module-level check
     (doesn't need any cache fixture)."""

@@ -1,8 +1,20 @@
 """FastGPTReadOnlyClient unit tests — plan §4.3 AC#1-3, AC#6, AC#9.
 
-Mock-vs-real grounding (守 feedback_tdd_mock_vs_real_api 第 12 次同型):
-- list_collections mock body shape ``{"data": {"list": [{"_id", "name"}]}}``
-  matches kb-adapter ``src/kb_adapter/translator.py:40-48`` real-code grep.
+Mock-vs-real grounding (守 feedback_tdd_mock_vs_real_api 第 13 次同型):
+- ``list_collections`` is **POST** ``/api/core/dataset/collection/list``
+  with JSON body ``{"datasetId","offset","pageSize"}``; the response list
+  lives at ``data.data`` with a sibling ``data.total`` for pagination.
+  **FastGPT v4.14.10.2 list 用 POST 实测对账 (2026-06-04, TASK-KBFIX-1).**
+  The OLD mock shape (GET ?datasetId= → ``data.list``) never matched the
+  live API — that mismatch was the KB-panel bug (unit tests green, real
+  「知识库内容」面板 showed 暂无文档). Do NOT regress these mocks back to
+  GET/``data.list``; read-only means no writes, POST-with-body is just how
+  FastGPT transports the query.
+- ``get_collection_files`` (collection/detail GET ?id=) is unchanged; a
+  *virtual* collection (no separate uploaded file) returns
+  ``{code:200, data:{_id,name,type:"virtual",createTime}}`` and the client
+  falls back to the collection itself as the pseudo-file (实测 — this is the
+  exact shape behind the 'TASK-33 手册' panel case).
 - All status / connectivity scenarios use a real httpx.MockTransport so we
   exercise the actual request/response path (no per-method patching).
 """
@@ -40,32 +52,45 @@ def _build_client(handler) -> FastGPTReadOnlyClient:
     )
 
 
+def _req_body(request: httpx.Request) -> dict:
+    """Decode a MockTransport request's JSON body (POST list/health)."""
+    return json.loads(request.content) if request.content else {}
+
+
+def _list_page(items: list[dict], total: int) -> dict:
+    """Real FastGPT v4.14.10.2 collection/list response envelope."""
+    return {"code": 200, "data": {"data": items, "total": total}}
+
+
 # --------------------------------------------------------------------- AC#1 list_collections
 async def test_list_collections_happy_path_real_field_names():
-    """Mock body uses real FastGPT v4.14.x fields (`data.list[]._id, .name`)
-    grounded against kb-adapter translator.py."""
+    """Mock body uses the real FastGPT v4.14.10.2 POST shape:
+    request = POST + body{datasetId,offset,pageSize};
+    response = {code:200, data:{data:[{_id,name,fileId?}], total}}."""
     captured: dict = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured["method"] = request.method
         captured["url"] = str(request.url)
         captured["auth"] = request.headers.get("Authorization")
-        return httpx.Response(
-            200,
-            json={"data": {"list": [
-                {"_id": "coll1", "name": "员工守则.pdf", "fileId": "f1"},
-                {"_id": "coll2", "name": "福利政策.docx"},
-            ]}},
-        )
+        captured["body"] = _req_body(request)
+        return httpx.Response(200, json=_list_page([
+            {"_id": "coll1", "name": "员工守则.pdf", "type": "file", "fileId": "f1"},
+            {"_id": "coll2", "name": "福利政策.docx", "type": "virtual"},
+        ], total=2))
 
     client = _build_client(handler)
     result = await client.list_collections("ds-123")
 
-    assert captured["method"] == "GET"
-    assert "datasetId=ds-123" in captured["url"]
-    assert captured["url"].startswith("http://fastgpt.example/api/core/dataset/collection/list")
+    # POST + JSON body (datasetId no longer in the query string)
+    assert captured["method"] == "POST"
+    assert captured["url"] == "http://fastgpt.example/api/core/dataset/collection/list"
+    assert captured["body"]["datasetId"] == "ds-123"
+    assert captured["body"]["offset"] == 0
+    assert captured["body"]["pageSize"] == client_module.LIST_PAGE_SIZE
     assert captured["auth"] == "Bearer test-key"
 
+    # response parsed from data.data (NOT data.list)
     assert [c.collection_id for c in result] == ["coll1", "coll2"]
     assert result[0].name == "员工守则.pdf"
     assert result[0].file_id == "f1"
@@ -74,16 +99,119 @@ async def test_list_collections_happy_path_real_field_names():
 
 async def test_list_collections_drops_entries_missing_id():
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"data": {"list": [
+        return httpx.Response(200, json=_list_page([
             {"_id": "ok", "name": "yes.pdf"},
             {"name": "no-id-skipped.pdf"},  # silently dropped
-        ]}})
+        ], total=2))
 
     result = await _build_client(handler).list_collections("ds-x")
     assert [c.collection_id for c in result] == ["ok"]
 
 
+async def test_list_collections_paginates_until_short_page(monkeypatch):
+    """A dataset with > pageSize collections must be returned in full —
+    walk every page (offset advances by page length) until a short/empty
+    page. Shrink LIST_PAGE_SIZE to 2 so the test stays small."""
+    monkeypatch.setattr(client_module, "LIST_PAGE_SIZE", 2)
+    requests: list[dict] = []
+    # 3 collections total, pageSize 2 → page0 [c0,c1], page1 [c2] (short → stop)
+    all_items = [{"_id": f"c{i}", "name": f"f{i}.pdf"} for i in range(3)]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = _req_body(request)
+        requests.append(body)
+        off, size = body["offset"], body["pageSize"]
+        return httpx.Response(200, json=_list_page(all_items[off:off + size], total=3))
+
+    result = await _build_client(handler).list_collections("ds-page")
+    assert [c.collection_id for c in result] == ["c0", "c1", "c2"]
+    assert [r["offset"] for r in requests] == [0, 2]  # 2 pages, no wasted 3rd
+
+
+async def test_list_collections_stops_at_total_on_exact_page_multiple(monkeypatch):
+    """When total is an exact multiple of pageSize, the ``offset >= total``
+    terminator must stop the loop — no wasted empty trailing request."""
+    monkeypatch.setattr(client_module, "LIST_PAGE_SIZE", 2)
+    requests: list[dict] = []
+    all_items = [{"_id": f"c{i}", "name": f"f{i}.pdf"} for i in range(4)]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = _req_body(request)
+        requests.append(body)
+        off, size = body["offset"], body["pageSize"]
+        return httpx.Response(200, json=_list_page(all_items[off:off + size], total=4))
+
+    result = await _build_client(handler).list_collections("ds-exact")
+    assert [c.collection_id for c in result] == ["c0", "c1", "c2", "c3"]
+    assert [r["offset"] for r in requests] == [0, 2]  # stopped at total, no offset=4 call
+
+
+async def test_list_collections_warns_when_max_pages_cap_hit(monkeypatch, caplog):
+    """no-silent-caps: if upstream keeps returning full pages past
+    _LIST_MAX_PAGES, the loop must stop AND emit a log.warning so the caller
+    isn't misled into thinking it got every collection (REWORK-KBFIX-1-INDEP ①)."""
+    import logging
+
+    monkeypatch.setattr(client_module, "LIST_PAGE_SIZE", 2)
+    monkeypatch.setattr(client_module, "_LIST_MAX_PAGES", 2)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        off = _req_body(request)["offset"]
+        # always a full page (== pageSize) with total absent → no natural
+        # terminator → cap kicks in after _LIST_MAX_PAGES pages
+        return httpx.Response(200, json={"code": 200, "data": {"data": [
+            {"_id": f"c{off}", "name": f"f{off}.pdf"},
+            {"_id": f"c{off + 1}", "name": f"f{off + 1}.pdf"},
+        ]}})  # no "total"
+
+    with caplog.at_level(logging.WARNING, logger="ncmu_backend.fastgpt_readonly.client"):
+        result = await _build_client(handler).list_collections("ds-runaway")
+
+    assert len(result) == 4  # 2 pages * 2 items — stopped at the cap, not infinite
+    assert any(
+        "_LIST_MAX_PAGES" in r.message and "ds-runaway" in r.message
+        for r in caplog.records
+    ), "expected a truncation log.warning on cap hit"
+
+
+async def test_list_collections_non_numeric_total_does_not_raise():
+    """Robustness: a non-numeric upstream ``total`` (e.g. "") must not raise
+    ValueError — treat it as unknown and let the short/empty-page terminators
+    stop the loop (REWORK-KBFIX-1-INDEP ②). Real FastGPT returns an int."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        # short page (1 < pageSize) so it terminates; junk total must be ignored
+        return httpx.Response(200, json={"code": 200, "data": {
+            "data": [{"_id": "c-only", "name": "x.pdf"}],
+            "total": "",  # non-numeric junk
+        }})
+
+    result = await _build_client(handler).list_collections("ds-junk-total")
+    assert [c.collection_id for c in result] == ["c-only"]
+
+
 # --------------------------------------------------------------------- AC#1 get_collection_files
+async def test_get_collection_files_virtual_collection_real_shape():
+    """Real FastGPT v4.14.10.2 virtual collection (no separate file):
+    detail returns ``{code:200, data:{_id,name,type:"virtual",createTime}}``
+    with no file/files key → client falls back to the collection itself as
+    the pseudo-file. file_id=_id, original_filename=name. This is the exact
+    shape behind the 'TASK-33 手册' KB-panel case the bug fix unblocks."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"  # detail stays GET
+        assert "id=coll-33" in str(request.url)
+        return httpx.Response(200, json={"code": 200, "data": {
+            "_id": "coll-33",
+            "name": "TASK-33 手册",
+            "type": "virtual",
+            "createTime": "2026-06-04T00:00:00Z",
+        }})
+
+    files = await _build_client(handler).get_collection_files("coll-33")
+    assert len(files) == 1
+    assert files[0].file_id == "coll-33"
+    assert files[0].original_filename == "TASK-33 手册"
+
+
 async def test_get_collection_files_unwraps_single_file_shape():
     """FastGPT detail response can carry ``data.file`` (single) — client
     must coerce that into a one-element list of FileMeta."""
@@ -199,6 +327,17 @@ async def test_fastgpt_500_without_inner_code_403_routes_to_server_error():
         await _build_client(handler).list_collections("ds")
 
 
+async def test_fastgpt_500_unexist_dataset_routes_to_server_error():
+    """Real FastGPT v4.14.10.2 returns 500 ``{"code":501002,"unExistDataset"}``
+    for an unknown datasetId (实测 2026-06-04). It's a genuine upstream 5xx
+    (not the 403 auth quirk) → FastGPTServerError."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, json={"code": 501002, "statusText": "unExistDataset"})
+
+    with pytest.raises(FastGPTServerError):
+        await _build_client(handler).list_collections("nonexistent-ds")
+
+
 async def test_418_classifies_as_FastGPTUnknownError():
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(418, json={"detail": "i am a teapot"})
@@ -229,7 +368,8 @@ async def test_authorization_header_uses_bearer_FASTGPT_API_KEY():
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured["auth"] = request.headers.get("Authorization")
-        return httpx.Response(200, json={"data": {"list": []}})
+        captured["method"] = request.method
+        return httpx.Response(200, json=_list_page([], total=0))
 
     client = FastGPTReadOnlyClient(
         base_url="http://fastgpt.example",
@@ -238,14 +378,45 @@ async def test_authorization_header_uses_bearer_FASTGPT_API_KEY():
     )
     await client.list_collections("ds")
     assert captured["auth"] == "Bearer real-secret"
+    assert captured["method"] == "POST"
 
 
-# --------------------------------------------------------------------- AC#6 health_check (path A)
+# --------------------------------------------------------------------- AC#6 health_check (POST probe)
+async def test_health_check_probes_via_post_with_body():
+    """health_check POSTs the bogus __healthcheck__ dataset (same endpoint
+    + method as list_collections). datasetId travels in the body, not the
+    query string."""
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["method"] = request.method
+        captured["url"] = str(request.url)
+        captured["body"] = _req_body(request)
+        return httpx.Response(200, json=_list_page([], total=0))
+
+    result = await _build_client(handler).health_check()
+    assert result == {"alive": True, "status_code": 200}
+    assert captured["method"] == "POST"
+    assert captured["url"].endswith("/api/core/dataset/collection/list")
+    assert captured["body"]["datasetId"] == HEALTHCHECK_DATASET_ID
+
+
+async def test_health_check_500_unexist_dataset_is_alive():
+    """The real reachability signal: POST __healthcheck__ → 500
+    ``{"code":501002,"unExistDataset"}`` means the service is **reachable
+    but the dataset is absent** → alive (NOT unreachable). This is the
+    distinction health_check exists to make."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, json={"code": 501002, "statusText": "unExistDataset"})
+
+    result = await _build_client(handler).health_check()
+    assert result == {"alive": True, "status_code": 500}
+
+
 async def test_health_check_500_with_auth_error_is_alive():
     """500 + JSON {"code":403} from FastGPT means the service responded
-    (auth handler executed). Path A: any non-404 + non-connect is alive."""
+    (auth handler executed). Any non-404 + non-connect is alive."""
     def handler(request: httpx.Request) -> httpx.Response:
-        assert f"datasetId={HEALTHCHECK_DATASET_ID}" in str(request.url)
         return httpx.Response(500, json={"code": 403, "statusText": "unAuthorization"})
 
     result = await _build_client(handler).health_check()
@@ -254,7 +425,7 @@ async def test_health_check_500_with_auth_error_is_alive():
 
 async def test_health_check_200_is_alive():
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"data": {"list": []}})
+        return httpx.Response(200, json=_list_page([], total=0))
 
     assert (await _build_client(handler).health_check())["alive"] is True
 
@@ -285,7 +456,7 @@ async def test_asyncio_cancellation_propagates_through_list_call():
 
     async def slow_handler(request: httpx.Request) -> httpx.Response:
         await asyncio.sleep(5.0)
-        return httpx.Response(200, json={"data": {"list": []}})
+        return httpx.Response(200, json=_list_page([], total=0))
 
     client = _build_client(slow_handler)
     task = asyncio.create_task(client.list_collections("ds"))
@@ -303,9 +474,9 @@ async def test_list_collections_caches_within_ttl():
     def handler(request: httpx.Request) -> httpx.Response:
         nonlocal call_count
         call_count += 1
-        return httpx.Response(200, json={"data": {"list": [
+        return httpx.Response(200, json=_list_page([
             {"_id": "c1", "name": "a.pdf"},
-        ]}})
+        ], total=1))
 
     client = _build_client(handler)
     a = await client.list_collections("ds-cache")
@@ -322,9 +493,9 @@ async def test_list_collections_misses_after_ttl_expiry(monkeypatch):
     def handler(request: httpx.Request) -> httpx.Response:
         nonlocal call_count
         call_count += 1
-        return httpx.Response(200, json={"data": {"list": [
+        return httpx.Response(200, json=_list_page([
             {"_id": f"c{call_count}", "name": f"file-{call_count}.pdf"},
-        ]}})
+        ], total=1))
 
     fake_now = {"t": 1000.0}
     from ncmu_backend.fastgpt_readonly import cache as cache_module
@@ -359,9 +530,9 @@ async def test_404_invalidates_metadata_cache_entry():
         call_count += 1
         if state["phase"] == "404":
             return httpx.Response(404, json={"error": "missing"})
-        return httpx.Response(200, json={"data": {"list": [
+        return httpx.Response(200, json=_list_page([
             {"_id": "c-after", "name": "after.pdf"},
-        ]}})
+        ], total=1))
 
     client = _build_client(handler)
     with pytest.raises(FastGPTNotFound):
