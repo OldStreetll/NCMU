@@ -10,7 +10,9 @@
 # =====================================================================
 set -eu
 
-PROFILE="${DEPLOY_PROFILE:-dev}"
+# Default = dogfood (baked-SPA HTTP build, TASK-NGX-1). dev/prod are
+# opt-in via DEPLOY_PROFILE=dev (vite reverse-proxy) / =prod (TLS).
+PROFILE="${DEPLOY_PROFILE:-dogfood}"
 SRC_DIR="/etc/nginx/templates-source"
 DST_DIR="/etc/nginx/templates"
 SRC="${SRC_DIR}/${PROFILE}.conf.template"

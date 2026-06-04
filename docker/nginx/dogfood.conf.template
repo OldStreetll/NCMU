@@ -1,0 +1,82 @@
+# =====================================================================
+# ncmu-nginx : dogfood profile (TASK-NGX-1)
+# ---------------------------------------------------------------------
+# Internal / dogfood prod build: HTTP single entry point serving the
+# baked SPA (stage2 COPY'd /usr/share/nginx/html) directly from nginx,
+# no Vite dev server. Selected when DEPLOY_PROFILE=dogfood (the new
+# compose default) — see 00-ncmu-profile-select.sh.
+#
+# Boss-decided scope (no real TLS): HTTP only, no HSTS, CSP relaxed so
+# antd v5 CSS-in-JS (runtime-injected <style> tags) renders — hence
+# `style-src 'self' 'unsafe-inline'`. The strict TLS policy lives in
+# prod.conf.template (untouched, future real prod).
+#
+# Differences vs dev.conf.template:
+#   - `/` serves baked static SPA via try_files (client-side routing
+#     fallback to /index.html) instead of reverse-proxying vite:5173.
+#   - no HMR WebSocket map (static serve needs no Upgrade headers).
+#   - /api/v1/ncmu/ is a REAL reverse proxy to ncmu-backend:8000
+#     (replaces prod.conf.template's 503 placeholder).
+# =====================================================================
+
+server {
+    listen ${NCMU_NGINX_HTTP_PORT} default_server;
+    server_name ${NCMU_NGINX_SERVER_NAME};
+
+    # ----- security headers (dogfood: HTTP, no HSTS; CSP relaxed for
+    #       antd v5 CSS-in-JS — style-src must allow 'unsafe-inline') ---
+    add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self' data:" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+
+    client_max_body_size ${NCMU_NGINX_CLIENT_MAX_BODY_SIZE};
+
+    # ----- healthcheck (used by compose healthcheck) ------------------
+    location = /healthz {
+        default_type text/plain;
+        return 200 "ok\n";
+    }
+
+    # ----- Phase 1 ncmu-backend: REAL reverse proxy (not 503) ---------
+    # `^~` keeps this ahead of /api/ (Dify) below so /api/v1/ncmu/* never
+    # leaks into the Dify console upstream. proxy_common.conf carries the
+    # forwarded headers + proxy_buffering off + 300s read/send timeouts,
+    # adequate for the SSE chat stream (one-way, no WS upgrade).
+    location ^~ /api/v1/ncmu/ {
+        proxy_pass http://ncmu-backend:8000;
+        include /etc/nginx/snippets/proxy_common.conf;
+    }
+
+    # ----- Dify console + app paths reverse-proxied to dify-nginx -----
+    location /console/ { proxy_pass http://dify-nginx:80; include /etc/nginx/snippets/proxy_common.conf; }
+    location /v1/      { proxy_pass http://dify-nginx:80; include /etc/nginx/snippets/proxy_common.conf; }
+    location /api/     { proxy_pass http://dify-nginx:80; include /etc/nginx/snippets/proxy_common.conf; }
+    location /files/   { proxy_pass http://dify-nginx:80; include /etc/nginx/snippets/proxy_common.conf; }
+    location /explore/ { proxy_pass http://dify-nginx:80; include /etc/nginx/snippets/proxy_common.conf; }
+    location /e/       { proxy_pass http://dify-nginx:80; include /etc/nginx/snippets/proxy_common.conf; }
+    location /mcp      { proxy_pass http://dify-nginx:80; include /etc/nginx/snippets/proxy_common.conf; }
+    location /triggers { proxy_pass http://dify-nginx:80; include /etc/nginx/snippets/proxy_common.conf; }
+
+    # ----- external app jump buttons (mirror dev.conf.template) -------
+    # Exact matches so they win over the catch-all `location /` below.
+    # Dify web UI and FastGPT both assume the root path → 302 to their
+    # published host ports rather than prefix-proxying (which breaks their
+    # absolute asset URLs). $host stays browser-relative.
+    location = /dify {
+        return 302 http://$host:8080/;
+    }
+    location = /fastgpt {
+        return 302 http://$host:3000/;
+    }
+
+    # ----- root: serve the baked SPA, client-side routing fallback ----
+    # The SPA owns client-side routes (e.g. /admin/monitoring); try_files
+    # falls back to /index.html so deep links don't 404. SPA changes need
+    # `docker compose build ncmu-nginx` to take effect (not hot-reload;
+    # use `--profile dev` for hot-reload).
+    location / {
+        root /usr/share/nginx/html;
+        try_files $uri $uri/ /index.html;
+    }
+}

@@ -1,0 +1,18 @@
+# =====================================================================
+# Build context for the ncmu-nginx multi-stage image is the repo root
+# (compose `context: .`), but stage1 only needs ncmu-spa/ source and
+# stage2 only needs docker/nginx/. Ignore everything, re-include just
+# those two trees, then drop heavy/generated subdirs — the repo root
+# otherwise holds dify/fastgpt/pg data we never want in the context.
+# =====================================================================
+*
+!ncmu-spa
+!docker
+
+# Heavy / generated content inside the re-included paths
+ncmu-spa/node_modules
+ncmu-spa/dist
+ncmu-spa/.vite
+ncmu-spa/playwright-report
+ncmu-spa/test-results
+**/*.log
