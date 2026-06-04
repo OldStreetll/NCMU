@@ -206,6 +206,14 @@ class Settings(BaseSettings):
         """Parsed NCMU_ADMIN_USER_IDS as a set, lower-cased."""
         return {u.strip().lower() for u in self.NCMU_ADMIN_USER_IDS.split(",") if u.strip()}
 
+    def derive_is_admin(self, user_id: object) -> bool:
+        """Whether ``user_id`` is in the admin whitelist (env-driven, lower-cased
+        membership). Single source for the ``is_admin`` display/claim flag across
+        dev-login + dingtalk-login; authorization source-of-truth stays in
+        auth/deps.py. Byte-equivalent to ``str(user_id).lower() in
+        settings.admin_user_id_set``."""
+        return str(user_id).lower() in self.admin_user_id_set
+
     @property
     def is_prod(self) -> bool:
         return self.DEPLOY_PROFILE == "prod"

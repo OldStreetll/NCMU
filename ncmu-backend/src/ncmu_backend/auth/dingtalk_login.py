@@ -192,7 +192,7 @@ async def login_via_dingtalk(
 
     # is_admin 与 dev-login 同源：settings.admin_user_id_set（authorization
     # source-of-truth 在 auth/deps.py，claim 仅供 SPA display sync）。
-    is_admin = str(user.id).lower() in settings.admin_user_id_set
+    is_admin = settings.derive_is_admin(user.id)
     jwt_str, exp = sign_jwt(
         str(user.id),
         user.name,
